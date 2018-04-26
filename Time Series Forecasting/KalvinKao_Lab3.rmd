@@ -1,0 +1,1418 @@
+---
+#title: "W271 Lab 3 (Kalvin Kao)"
+geometry: margin=1.1cm
+#fontsize: 9pt
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+#W271 Lab 3: Kalvin Kao
+```{r echo=FALSE}
+rm(list = ls()); #knitr::opts_chunk$set(tidy.opts=list(width.cutoff=60),tidy=TRUE)
+```
+The following functions were created for analyses that were repeated throughout this report.  $tsplot()$ provides the time plot, histogram, ACF plot, and PACF plot of a time series, with options to also include the Augmented Dickey-Fuller test (null hypothesis: series has a unit root), Ljung-Box test (null hypothesis: series is uncorrelated), and/or Shapiro-Wilk test (null hypothesis: sample distribution is normal) results on the series.  $search.sarima.params()$ fits a range of seasonal ARIMA models according to the parameter ranges specified in the function call, and summarizes their in-sample fit (AIC and BIC), as well as the results of the Ljung-Box and Shapiro-Wilk tests on their residuals.  $get.fcst()$ calculates a forecast from a time-series model, including its 95% confidence interval limits.
+<!--why AIC,BIC-->
+```{r collapse=TRUE}
+tsplot<-function(series,title,use.adf,use.box,use.shap){par(mfrow=c(2,2));plot.ts(series,main="");
+  title(paste("Time Plot of",title));hist(series,main="");title(paste("Histogram of",title))
+  acf(series,main="");title(paste("ACF of",title));pacf(series,main="");title(paste("PACF of",title))
+  adf.check<-ifelse(use.adf==1,yes=print(paste("ADF Test P-Value for",title,":",
+                                               adf.test(series)$p.value)),no=0)
+  box.check<-ifelse(use.box==1,yes=print(paste("Ljung-Box Test P-Value for",title,":",
+                                               Box.test(series, type="Ljung-Box")$p.value)),no=0)
+  norm.check<-ifelse(use.shap==1,yes=print(paste("Shapiro-Wilk Test P-Value for",title,":",
+                                                 shapiro.test(series)$p.value)),no=0)}
+search.sarima.params<-function(time.series,frequency,max.p,d,max.q,max.P,D,max.Q){results<-data.frame()
+  for(p in 0:max.p){;for(q in 0:max.q){;for(P in 0:max.P){;for(Q in 0:max.Q){
+          mod<-Arima(time.series,order=c(p,d,q),seasonal=list(order=c(P,D,Q),frequency),method = "ML")
+          results<-rbind(results,data.frame(p=p,d=d,q=q,P=P,D=D,Q=Q,AIC=mod$aic,BIC=mod$bic,
+                                            box.test=Box.test(mod$residuals, type="Ljung-Box")$p.value,
+                                            shapiro.test=shapiro.test(mod$residuals)$p.value))
+  };};};};return(head(results[order(results$AIC, results$BIC),],5))}
+get.fcst<-function(est.mod,n.steps,ci,st.yr,st.mo,freq){fcst<-predict(est.mod,n.ahead=n.steps,ci=ci)
+  pred<-ts(fcst$pred,st=c(st.yr,st.mo),fr=freq);pred.uci<-pred+2*fcst$se;pred.lci<-pred-2*fcst$se;
+  return(data.frame(pred=pred,u=pred.uci,l=pred.lci));}
+```
+<!--adf.test: null hypothesis of a unit root-->
+<!--box.test: null hypothesis is that the series is uncorrelated-->
+## Question 1: Univariate Time Series Analysis and Forecast
+***EDTSA:*** we begin by reading in the data for question 1 and examining its structure.
+```{r warning=FALSE, message=FALSE, collapse=TRUE}
+library(tseries); library(vars); library(forecast); #library(GGally); library(car)
+ecompctnsa<-read.csv("ECOMPCTNSA.csv",header=TRUE);dim(ecompctnsa);cbind(head(ecompctnsa),tail(ecompctnsa));   #str(ecompctnsa); ecompctnsa$DATE; ecompctnsa$ECOMPCTNSA
+```
+This dataset contains 69 observations of 2 variables-- the second variable, 'ECOMPCTNSA', is the series of interest (quarterly data of E-Commerce Retail Sales as a Percent of Total Sales), and the first variable, 'DATE', provides the date of the observations.  The DATE variable shows that this series is quarterly data that begins in Q4 of 1999 and ends in Q4 of 2016.  A thorough examination of both variables reveals no missing values and no coding issues or inconsistencies, and we also note that the smallest value of ECOMPCTNSA is 0.7-- the data contains no zero values, which is helpful for a later consideration of a log transformation.  We therefore continue by respecifying 'ECOMPCTNSA' as a time-series variable-- we also create a time series for training that ends in Q4 2014 so that its values in 2015 and 2016 can be used for back-testing (per the assignment instructions).
+
+```{r fig.width=8, fig.height=2, warning=FALSE, collapse=TRUE}
+q1.original.ts<-ts(ecompctnsa[,2],start=c(1999,4),frequency=4)
+ecompctnsa.ts<-window(q1.original.ts,start=c(1999,4),end=c(2014,4),frequency=4);par(mfrow=c(1,2))
+ts.plot(ecompctnsa.ts,main="Time Plot of original Series");acf(ecompctnsa.ts,main="ACF of Original Series")
+print(paste("ADF Test P-Value for Original Series:",adf.test(ecompctnsa.ts)$p.value))
+```
+```{r eval=FALSE, include=FALSE}
+#q1.test.ts<-window(q1.original.ts,start=c(2015,1),frequency=4)
+```
+<!--wtf is a box-cox transformation again?-->
+
+The plot of the time series clearly shows an increasing trend, seasonality, and increasing volatility over time.  The ACF and time series plot together also indicate that the series is not stationary, and the augmented Dickey-Fuller test additionally fails to reject the null hypothesis that this series has a unit root (with the alternative hypothesis that the series is stationary).  There is no evidence of extreme values in the series that would require investigation.
+
+<!--3x3 plot of autocorrelation between retail sales and its own lags-->
+```{r fig.width=8, fig.height=4.5, collapse=TRUE}
+par(mfrow=c(3,3)); for(lag.level in -1:-9){
+  lagged.intersection <- ts.intersect(ecompctnsa.ts, lag(ecompctnsa.ts, lag.level))
+  plot(as.vector(lagged.intersection[,2]), as.vector(lagged.intersection[,1]), main="", 
+       xlab="Lagged Series", ylab="Original"); title(paste("Lag:",lag.level))
+  abline(reg=lm(lagged.intersection[,1]~lagged.intersection[,2]))}
+```
+```{r eval=FALSE, include=FALSE, fig.width=8, fig.height=4, collapse=TRUE}
+par(mfrow=c(2,2)); for(lag.level in c(-1,-4,-7,-8)){
+  lagged.intersection <- ts.intersect(ecompctnsa.ts, lag(ecompctnsa.ts, lag.level))
+  plot(as.vector(lagged.intersection[,2]), as.vector(lagged.intersection[,1]), main="", 
+       xlab="Lagged Series", ylab="Original"); title(paste("Lag:",lag.level))
+  abline(reg=lm(lagged.intersection[,1]~lagged.intersection[,2]))}
+```
+The above plots of the series against its own lags additionally show that the series is highly correlated with its own lags.  It also appears as if the correlation is stronger (visually, more clustered around the trend line), at lags 4 and 8, which suggests a seasonal effect in the series.
+
+***Modeling***
+
+Since I'd like to model the trend in this series and since I do not have insight into the mechanisms that govern the trend, I use differencing to detrend the data, rather than subtracting a trend or curve fit.  This also allows the usage of an ARIMA model.  Both the original time plot and a time plot of the differenced series (omitted for conciseness) show that its variance is increasing with time.  Therefore, prior to differencing, the log transformation of the series is performed in order to stabilize its variance.  The ACF of the log transformed and first differenced series (again, omitted for conciseness) showed seasonal effects, so a further transformation is performed by taking a seasonal difference.  A model which fitted seasonal ARMA components instead of taking a seasonal difference was also investigated and is provided in the Appendix.  The following plots are for the series after a log transformation, first difference, and seasonal difference.
+
+```{r fig.width=8, fig.height=3.5, collapse=TRUE}
+tsplot(diff(diff(log(ecompctnsa.ts)), lag=4), "Stationary Transformation", 0, 0, 0)
+```
+
+The spike in the ACF and PACF at lag=4 suggests a seasonal component, so a parameter search is performed, focusing on the addition of seasonal AR and MA components up to order 2.  An MA component in the model is expected, since differencing a linear trend introduces moving average terms into a white noise series.
+
+<!--Arima(0,1,2)(1,1,0)-->
+<!--investigate seasonal AR(1)-->
+
+```{r collapse=TRUE}
+search.sarima.params(log(ecompctnsa.ts),4,0,1,0,2,1,2)
+```
+
+The summary above shows the top 5 models according to AIC and BIC.  All of the Arima(0,1,0)(P,1,Q)_4 models have a low AIC and fail to reject the null hypothesis that the residuals are uncorrelated, when P and Q are each less than 3.  The AIC and BIC for the Arima(0,1,0)(0,1,2)_4 model (top model) in particular is amongst the lowest values, and the Ljung-Box test for that model's residuals fails to reject the null hypothesis of no correlation, so this model is selected as a candidate for forecasting.  The parameter search also unfortunately shows that none of the top candidates pass the Shapiro-Wilk test for normality (as demonstrated by its significant p-values), which will prevent valid hypothesis tests on its estimates and will introduce some error in the forecast confidence intervals, but the model should still be useful for forecasting.  The use two seasonal terms is additionally consistent with the previous EDTSA finding that the series has especially high correlation with its own lags at lags of 4 and 8.
+
+<!--diagnostics-->
+<!--For Model: Arima(0,1,0)(0,1,2)_4-->
+```{r collapse=TRUE}
+q1.mod<-Arima(log(ecompctnsa.ts),order=c(0,1,0),seasonal=list(order=c(0,1,2),4),method="ML");q1.mod
+```
+
+The estimated Arima(0,1,0)(0,1,2)_4 model has highly statistically significant coefficients, and yields the formula: $x_t = x_{t-1} + x_{t-4} - x_{t-5} + w_{t} + \Theta_1 w_{t-4} + \Theta_2 w_{t-8}$, where $x_t = log(ecompctnsa.ts)$, $\Theta_1$= `r round(q1.mod$coef[1],2)`, and $\Theta_2$= `r round(q1.mod$coef[2],2)`.
+
+```{r fig.weidth=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+tsplot(q1.mod$residuals, "Model Residuals", 1, 1, 1)
+data.frame(roots=abs(polyroot(c(1, q1.mod$coef[1], q1.mod$coef[2]))), 
+           Theta1.CI=q1.mod$coef[1] + c(-2,2)*sqrt(q1.mod$var.coef)[1], 
+           Theta2.CI=q1.mod$coef[2] + c(-2,2)*sqrt(q1.mod$var.coef)[4])
+```
+
+The above dataframe shows the 95% confidence intervals of the model parameters, which do not include zero, as well as the roots of the seasonal MA characteristic equation-- both lie outside the unit circle, meaning that the model's seasonal MA process is invertible (which in turn means that it can be expressed as a function of previous values), and can therefore be used for forecasting.  An MA process is also always stationary.  The overall model residuals have several low values in the beginning and middle of the series that are slightly concerning, however, their ACF and PACF do resemble a white noise series.  The Augmented Dickey-Fuller and Box-Ljung tests on the residuals additionally reject the null hypothesis of a unit root and fail to reject the null hypothesis of no correlation, respectively.  The distribution of the residuals appears approximately normal-- its negative skew is likely a consequence of the log transformation of the series, and an empirical adjustment is therefore made prior to forecasting.  Although the Shapiro-Wilk test on the residuals strongly rejects the null hypothesis of a normal distribution, the other evidence indicates that the residuals are uncorrelated and could still be a realization of a white noise process-- the model is next used for forecasting with the understanding that the non-normality of the residuals may introduce some error.
+<!--#qqnorm(q1.mod$residuals); qqline(q1.mod$residuals)-->
+<!--empircal adjustment-->
+
+***Forecasting***
+```{r fig.width=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+q1.pred<-get.fcst(q1.mod,12,0.95,2015,1,4)
+ts.plot(cbind(q1.original.ts,exp(q1.pred$pred),exp(q1.pred$u),exp(q1.pred$l),
+              q1.original.ts-exp(ts.union(q1.mod$fitted, q1.pred$pred))),lty=c(1,2,3,3,4,4),
+        col=c(1,2,3,3,4,4),main="Forecast of Quarterly E-Commerce Retail Sales in 2015-2017")
+legend(x=2000,y=14,legend=c("original","predicted","95% confidence interval limit","residuals"),
+       lty=c(1,2,3,4),col=c(1,2,3,4))
+```
+
+The above plot shows the estimated model's forecasts for 2015 - 2017 (red), after fitting to the series (black).  The model residuals are shown in blue, with points after 2014 showing only a small error in back-testing (2015/2016 RMSE: `r round(sqrt((sum((exp(window(q1.pred$pred, st=c(2015,1),end=c(2016,4),fr=4))-window(q1.original.ts, st=c(2015,1),fr=4))^2))/8),2)`)-- the actual observations in 2015 and 2016 are within the 95% confidence bounds of the forecast (green), so this model is able to forecast well.  The forecast according to the model shows the trend and seasonality continuing to increase, however, its 95% confidence interval also shows that a decrease in the trend cannot be ruled out.
+
+Many other modeling approaches were investigated, and the notable alternatives are included in the Appendix.  One alternative fits a seasonal ARMA on the log transformed, first differenced series (i.e. ARIMA(0,1,0)(1,0,2)[4])-- this approach resulted in slightly better in-sample fit, but also less parsimony and evidence of correlation in the model residuals.  Another modeling approach fits a seasonal ARMA on the seasonally differenced series (i.e. ARIMA(2,0,0)(2,1,0)[4])-- such an approach satisfied all of the ARIMA model assumptions (including normality of its residuals), however, its in-sample fit and back-testing results were significantly worse and the resulting models were thus unfavorable for forecasting.
+
+<!--calculate RMSE-->
+<!--use aic, use forecast errors-->
+<!--residuals vs fitted-->
+<!--CIs on parameter estimates-->
+
+## Question 2: Multivariate Time Series Analysis and Forecast
+***EDTSA***
+```{r collapse=TRUE, eval=FALSE, include=FALSE}
+varData<-read.table("data_2018Spring_MTS.txt",header=TRUE); str(varData); #summary(varData)
+```
+```{r collapse=TRUE}
+varData<-read.table("data_2018Spring_MTS_v2.txt",header=TRUE); str(varData); #summary(varData)
+```
+The dataset contains 6 variables and 792 observations.  Variables year and mon indicate the time period of each observation-- no skipped or missing values were found.  The code that was used for this integrity check is omitted for conciseness and is instead available in the Appendix.  The remaining 4 variables are 4 monthly time series that begin in January 1947 and end in December 2012-- their original data format is that of a continuous numerical variable so they are re-specified as time-series variables, and the data following 1992 is excluded per the assignment instructions.  The following time plot of those series also shows that all values are above zero (which is important for a later consideration of a log transform), and do not show potential outliers.
+```{r fig.width=8, fig.height=3, collapse=TRUE}
+q2Data<-ts(varData[varData$year<1993,3:6],start=c(1947,1),frequency=12)
+q2Test<-ts(varData[varData$year>1992,3:6],st=c(1993,1),fr=12)
+ts.plot(q2Data,main="Time Plot of Original 4 Series",lty=c(1:4),col=c(1:4))
+legend(x=1950,y=80,legend=c(1:4),lty=c(1:4),col=c(1:4), cex=0.75)
+```
+All 4 series are highly persistent and are generally increasing, with series 1, 3, and 4 appearing to follow the same trends-- series 3 and 4 in particular appear to be very closely related.  These series are very long, with changes in their trends occurring multiple times.  The goal is to produce a forecast, so only data beginning in January 1983 are selected for modeling, since this more recent data seems to be more representative of the increasing trend towards the end of the original data.  Other models which include the full dynamics of the entire original series were also investigated and their results are included in the Appendix.  The ACF plots for the shortened series (beginning in January 1983) show again that the series are highly persistent (they are omitted here for conciseness and are instead available in the Appendix).  It is known that two series with trends can easily have a high correlation (also known as spurious correlation), so a first difference is taken on each series before examining their cross-correlations.
+
+```{r eval=FALSE, include=FALSE, fig.width=8, fig.height=1.5, collapse=TRUE}
+series1<-window(q2Data[,1],start=c(1983,1),frequency=12)
+series2<-window(q2Data[,2],start=c(1983,1),frequency=12)
+series3<-window(q2Data[,3],start=c(1983,1),frequency=12)
+series4<-window(q2Data[,4],start=c(1983,1),frequency=12)
+allseries<-cbind(series1,series2,series3,series4)
+```
+
+<!--The time plot and ACF graphs show that each series is highly persistent and clearly non-stationary.  Therefore, a first difference is taken to detrend each series prior to investigating their cross-correlations, since it is known that series with a unit root can easily have spurious correlation.-->
+
+<!--ggpairs(data.frame(allseries.diff), lower=list(continuous="points"))-->
+<!--after differencing, there is high contemporaneous correlation between series 1, 3, and 4-->
+```{r warning=FALSE, fig.width=8, fig.height=3, collapse=TRUE}
+series1<-window(q2Data[,1],start=c(1983,1),frequency=12)
+series2<-window(q2Data[,2],start=c(1983,1),frequency=12)
+series3<-window(q2Data[,3],start=c(1983,1),frequency=12)
+series4<-window(q2Data[,4],start=c(1983,1),frequency=12)
+allseries<-cbind(series1,series2,series3,series4)
+par(mfrow=c(2,3));for(a in 1:4){print(paste("ADF Test P-Value for Series",a,"(after differencing):",
+  adf.test(diff(allseries[,a]))$p.value));for(b in 1:4){if(a!=b & b>a){
+      ccf(diff(allseries[,a]),diff(allseries[,b]),ylim=c(-0.2,0.6),
+          main=paste("Series",a,"and Series",b));};};}
+```
+```{r warning=FALSE, fig.width=8, fig.height=3, collapse=TRUE, eval=FALSE, include=FALSE}
+series1<-window(q2Data[,1],start=c(1983,1),frequency=12)
+series2<-window(q2Data[,2],start=c(1983,1),frequency=12)
+series3<-window(q2Data[,3],start=c(1983,1),frequency=12)
+series4<-window(q2Data[,4],start=c(1983,1),frequency=12)
+allseries<-cbind(series1,series2,series3,series4)
+allseries.diff<-cbind(diff(series1),diff(series2),diff(series3),diff(series4))
+par(mfrow=c(2,3));for(a in 1:4){print(paste("ADF Test P-Value for Series",a,"(after differencing):",
+  adf.test(diff(allseries[,a]))$p.value));for(b in 1:4){if(a!=b & b>a){
+      ccf(allseries.diff[,a],allseries.diff[,b],ylim=c(-0.2,0.6),
+          main=paste("Series",a,"and Series",b));};};}
+```
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+series1<-window(q2Data[,1],start=c(1983,1),frequency=12)
+series2<-window(q2Data[,2],start=c(1983,1),frequency=12)
+series3<-window(q2Data[,3],start=c(1983,1),frequency=12)
+series4<-window(q2Data[,4],start=c(1983,1),frequency=12)
+allseries<-cbind(series1,series2,series3,series4)
+allseries.diff <- cbind(diff(series1), diff(series2), diff(series3), diff(series4))
+par(mfrow=c(2,3));for(a in 1:4){for(b in 1:4){if(a!=b & b>a){
+      ccf(allseries.diff[,a],allseries.diff[,b],main=paste("Series",a,"and Series",b));};};}
+#ggpairs(data.frame(allseries.diff), lower=list(continuous="points"))
+#after differencing, there is high contemporaneous correlation between series 1, 3, and 4
+```
+
+After first differencing, the Augmented Dickey-Fuller test (calculated above) is able to reject the null hypothesis of a unit root for each of the 4 series, and the cross-correlation between each differenced series can thus be checked for relationships that are more likely to be real (or which can at least help explain simultaneous trends).  The CCF plots above are for each combination of differenced series after January 1983-- there appears to be a small correlation between series 4 differences and past differences of series 1, but it is clear however that series 4 differences are correlated with both lagged _and_ future differences of series 3.  This also means that series 3 differences are correlated with lagged values of series 4 differences-- this relationship between series 3 and 4 is important because it allows the usage of a vector autoregressive (VAR) model in which each series in the model is regressed on lagged values of all other series in the model.  Therefore, the approach for simultaneously forecasting these 4 series is to use univariate ARIMA models for series 1 and 2, and a VAR model for series 3 and 4.
+
+<!--After first differencing, the Augmented Dickey-Fuller test (calculated above) is able to reject the null hypothesis of a unit root for each of the 4 series, and the cross-correlation between each differenced series can thus be checked for relationships that are more likely to be real (or which can at least help explain simultaneous trends).  The CCF plots above are for each combination of series. There is a small correlation between series 3 and past values of series 1 and 2, and between series 4 and past values series 2.  It is clear however that series 4 is correlated with past values of series 1, and more importantly, that it is correlated with both lagged _and_ future values of series 3.  This also means that series 3 is correlated with lagged values of Series 4-- this relationship between Series 3 and 4 is important because it allows the usage of a VAR model in which each series in the model is regressed on lagged values of all other series in the model.  Therefore, the approach to modeling these 4 series is to use univariate ARIMA models for Series 1 and 2, and a VAR model for Series 3 and 4.-->
+
+<!--The ACF and PACF of every series shows high persistance, and their plots also provide further indication that the series may not be stationary.  However, the Augmented Dickey-Fuller test provides some evidence that the null hypothesis of a unit root can be rejected for series 1 and 4.  Comparison of the time plots suggests that they may share a stochastic trend, and the above scatterplot matrix indeed shows that each series is highly correlated with each of the other series.  The cross-correlation plots also indicate that each series is highly correlated with the lagged values of the other series.-->
+
+<!--However, it is known that series with a stochastic trend can easily have a high correlation despite having no actual relationship (in other words, spurious correlation).  A Phillips-Ouliaris test was therefore also performed for each combination of series-- the above results reject the null hypothesis of no cointegration between series 1, 2, and 4.  Combinations involving series 3 failed to reject the null hypothesis of no cointegration.  Therefore, we proceed by using a VAR model for series 1, 2, and 4, and an ARIMA model for series 3.-->
+
+***Modeling***
+<!--Approach 1: Arima for Series 1 and 2; VAR for Series 3 and 4-->
+```{r eval=FALSE, include=FALSE}
+#tsplot(diff(series1), "series1: 1st diff", 1, 1)
+#tsplot(diff(diff(log(series1)),12), "series1: seasonal diff", 1, 1)
+#tsplot(diff(series1), "series1: log and 1st diff", 1, 1, 1)
+```
+```{r fig.width=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+tsplot(diff(log(series1)), "Series 1 after Log\nTransform and 1st Difference", 0, 0, 0)
+```
+
+Prior to modeling Series 1, a first difference is taken to remove the trend.  The plot of the differenced series (included in the Appendix), as well as subsequent model residuals, showed evidence of increasing variance, so a log transform is also taken in order to stabilize the variance.  The above time plot, histogram, ACF plot, and PACF plot are for series 1 after a log-transformation and first difference.  Other than a small spike in both the ACF and PACF at a lag of 3, the plots show no clear patterns, and a parameter search is therefore focused low orders of both seasonal and non-seasonal ARMA terms.
+
+<!--Prior to modeling Series 1, a first difference is taken to remove the trend.  The plot of the differenced series, as well as subsequent model residuals, showed evidence of increasing variance, so a log transform is also taken in order to stabilize the variance.  The above time plot, histogram, ACF plot, and PACF plot are for series 1 after a log-transformation and first difference.  The spike in the PACF at lag 1 indicates an AR term, and spikes in the ACF and especially the PACF at lags 12 and 24 suggest the need for seasonal components as well.  A parameter search is therefore focused on non-seasonal AR and MA components up to order 1, and seasonal AR and MA components up to order 2.-->
+
+```{r eval=FALSE, include=FALSE, fig.width=8, fig.height=8}
+par(mfrow=c(2,2)); for (lag.level in -10:-13) {
+  lagged.intersection <- ts.intersect((diff(log(series1))), lag(diff(log(series1)), lag.level))
+  plot(as.vector(lagged.intersection[,2]), as.vector(lagged.intersection[,1]), main="", 
+       xlab="Lagged Series", ylab="Original"); title(paste("Lag:",lag.level))
+  abline(reg=lm(lagged.intersection[,1]~lagged.intersection[,2]))}
+```
+```{r eval=FALSE, include=FALSE}
+#search.sarima.params(series1,12,2,1,2,1,0,1)
+#search.sarima.params(log(series1),12,2,1,2,2,0,1)
+#search.sarima.params(log(series1),12,2,1,2,1,0,2)
+#search.sarima.params(log(series1),12,1,1,1,2,0,2)
+```
+```{r collapse=TRUE}
+search.sarima.params(log(series1),12,2,1,2,1,0,1)
+```
+
+An ARIMA(0,1,0)(0,0,0)_12 model (a random walk for the log transformation of series 1) is the best candidate in terms of both AIC and BIC.  The Ljung-Box test on the residuals of all top models fails to reject the null hypothesis of no correlation, but all of the residuals also show evidence of non-normality (via the Shapiro-Wilk test).  However, the ARIMA(1,1,1)(0,0,0)[12] model has competitive AIC and BIC, and also fails to reject the null hypothesis of normality in its residuals (at the 5% level), so this model is selected as a candidate for forecasting.  While hypothesis testing with its estimates would be questionable due to the low p-value of the Shapiro-Wilk test on its residuals, the model should still be useful for forecasting.
+
+<!--An ARIMA(0,1,0)(0,0,0)_12 model (a random walk for the log transformation of series 1) is the best candidate in terms of both AIC and BIC, and a Ljung-Box test on its residuals fails to reject the null hypothesis of no correlation.  None of the top models passed the Shapiro-Wilk test for normality so hypothesis testing with their estimates would not be valid, however, these models would still be useful for forecasting.  The random walk model is selected for its low AIC and parsimony.-->
+<!--An ARIMA(1,1,0)(0,0,2)_12 model is the best candidate in terms of both AIC and BIC, and a Ljung-Box test on its residuals fails to reject the null hypothesis of no correlation.-->
+```{r include=FALSE, eval=FALSE}
+#q2.mod.1 <- Arima(series1, order=c(1,1,1), seasonal=list(order=c(1,0,1),12), method="ML")
+#q2.mod.1 <- Arima(log(series1), order=c(0,1,1), seasonal=list(order=c(1,0,1),12), method="ML")
+#q2.mod.1 <- Arima(log(series1),order=c(1,1,0),seasonal=list(order=c(0,0,2),12),method="ML");q2.mod.1
+```
+```{r warning=FALSE, fig.width=8, fig.height=3.5, collapse=TRUE}
+q2.mod.1 <- Arima(log(series1),order=c(1,1,1),seasonal=list(order=c(0,0,0),12),method="ML");q2.mod.1
+tsplot(q2.mod.1$residuals, "Series 1 Model Residuals", 1, 1, 1)
+data.frame(phi1.CI=q2.mod.1$coef[1] + c(-2,2)*sqrt(q2.mod.1$var.coef)[1],
+           theta1.CI=q2.mod.1$coef[2] + c(-2,2)*sqrt(q2.mod.1$var.coef)[4])
+```
+
+The series 1 model summary above shows that the AR term is statistically significant-- its 95% confidence interval, shown in the dataframe above, does not include zero.  The MA term, however, has only borderline significance.  Since the coefficient on the AR term is `r round(q2.mod.1$coef[1],2)`, the characteristic equation for the AR process is (1-`r round(q2.mod.1$coef[1],2)`B), which has a root > 1 and is therefore stationary.  The coefficient on the MA component is `r round(q2.mod.1$coef[2],2)`, so its characteristic equation is (1-`r round(abs(q2.mod.1$coef[2]),2)`B), which has a root > 1 and is therefore invertible.  Note again that MA processes are always stationary.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Ljung-Box and Shapiro-Wilk tests on the residuals fail to reject the null hypotheses of no correlation and normality (at the 5% level), respectively.  The Augmented Dickey-Fuller test on the residuals also rejects the null hypothesis of a unit root.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model will be used for forecasting.
+```{r eval=FALSE, include=FALSE, warning=FALSE, fig.width=8, fig.height=4}
+q2.mod.1 <- Arima(log(series1),order=c(0,1,0),seasonal=list(order=c(0,0,0),12),method="ML");#q2.mod.1
+tsplot(q2.mod.1$residuals, "Series 1 Model Residuals", 1, 1, 1)
+```
+<!--Arima(0,1,1)(1,0,2)_12 also very good-->
+<!--The model summary is omitted because this model has no parameters to estimate.  The Augmented Dickey-Fuller, Ljung-Box, and Shapiro-Wilk tests on the model residuals reject the null hypothesis that they contain a unit root, fail to reject the null hypothesis of no correlation, but also reject the null hypothesis of normality, respectively.  As mentioned previously, it is acceptable that the residuals are not normally distributed since the goal is to forecast, not perform hypothesis testing.  Additionally, the above time plot, histogram, ACF plot, and PACF plot of the residuals-->
+
+
+<!--The series 1 model summary shows that each of the coefficients is statistically significant-- their 95% confidence intervals, shown in the dataframe above, do not include zero.  Since the coefficient on the AR term is `r round(q2.mod.1$coef[1],2)`, the characteristic equation for the AR process is (1-`r round(q2.mod.1$coef[1],2)`B), which has a root > 1 and is therefore stationary.  The roots of the characteristic equation for the seasonal MA component are also shown in the dataframe above-- since they are also greater than 1, the seasonal MA process is invertible.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Box-Ljung test fails to reject the null hypothesis of no correlation in the residuals.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model can be used for forecasting.-->
+
+
+```{r eval=FALSE, include=FALSE}
+#tsplot(diff(series2), "series2: 1st diff", 1, 1)
+#tsplot(diff(log(series2)), "series2: 1st diff", 1, 1, 1)
+```
+Prior to modeling Series 2, a first difference is taken to remove the trend.  The following time plot, histogram, ACF plot, and PACF plot are for series 2 after a first difference.  
+```{r fig.width=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+tsplot(diff(series2), "Series 2\nafter 1st Difference", 1, 1, 1)
+```
+Both the ACF and PACF graphs show negative correlations up to lag 3, so the following parameter search focuses on the addition of non-seasonal AR and MA components up to order 3.  The spike at lag 16 is noted, but no action is taken against it since 5% of lags are expected to be significant at the 95% confidence level.
+<!--Prior to modeling Series 2, a first difference is taken to remove the trend.  The plot of the differenced series, as well as subsequent model residuals, showed evidence of increasing variance, so a log transform is also taken in order to stabilize the variance.  The above time plot, histogram, ACF plot, and PACF plot are for series 2 after a log-transformation and first difference.  There are no clear patterns in the ACF and PACF graphs-- only small spikes at a lag of 1 in both graphs, so the following parameter search focuses on the addition of non-seasonal AR and MA components up to order 2.  It is notable that the small spikes at lags 12 and 24 are almost significant, suggesting that seasonal components may be helpful.  A model that included seasonal components was tested-- the AIC and BIC were improved, however, this improvement was only minor and we therefore omit seasonal components for greater model parsimony, which is favorable for forecasting.-->
+<!--search.sarima.params(log(series2),12,2,1,2,0,0,2)-->
+```{r eval=FALSE, include=FALSE}
+#search.sarima.params(log(series2),12,2,1,2,0,0,0)
+#search.sarima.params((series2),12,3,1,3,1,0,1)
+#q2.mod.2<-Arima(log(series2),order=c(1,1,2),seasonal=list(order=c(0,0,0),12),method="ML");q2.mod.2
+```
+```{r collapse=TRUE}
+search.sarima.params(series2,12,3,1,3,0,0,0)
+```
+This parameter search yields multiple SARIMA models with comparably low AIC and BIC, and no evidence of correlation or non-normality in their residuals, according to the Ljung-Box and Shapiro-Wilk tests.  The ARIMA(0,1,1)(0,0,0)[12] model is selected because it is more parsimonious than the other top models while having a comparable in-sample fit-- in fact, its BIC is the lowest in the model search.
+<!--In this parameter search, an ARIMA(1,1,2)(0,0,0)_12 model is the best candidate in terms of both AIC and BIC, and a Ljung-Box test on its residuals fails to reject the null hypothesis of no correlation.-->
+<!--q2.mod.2 <- Arima(series2, order=c(1,1,2), seasonal=list(order=c(0,0,0),12), method="ML")-->
+<!--q2.mod.2<-Arima(log(series2),order=c(1,1,2),seasonal=list(order=c(0,0,2),12),method="ML");q2.mod.2-->
+```{r fig.width=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+q2.mod.2<-Arima(series2,order=c(0,1,1),seasonal=list(order=c(0,0,0),12),method="ML");q2.mod.2
+tsplot(q2.mod.2$residuals, "Series 2 Model Residuals", 1, 1, 1)
+print(paste("95% Confidence Interval for the MA Parameter: (",q2.mod.2$coef[1]-
+              (2*sqrt(q2.mod.2$var.coef)[1]),",",q2.mod.2$coef[1]+(2*sqrt(q2.mod.2$var.coef)[1]),")"))
+```
+The series 2 model summary shows that the MA term coefficient is significant-- its 95% confidence interval, also calculated above, does not include zero.  Since the coefficient on the MA term is `r round(q2.mod.2$coef[1],2)`, the characteristic equation for the MA process is (1-`r round(abs(q2.mod.2$coef[1]),2)`B), which has a root > 1 and the MA component is therefore invertible.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Ljung-Box and Shapiro-Wilk tests on the model residuals fail to reject the null hypotheses of no correlation and normality, respectively.  The Augmented Dickey-Fuller test on the residuals additionally rejects the null hypothesis of a unit root.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model will be used for forecasting.
+<!--The series 2 model summary shows that each of the coefficients is statistically significant-- their 95% confidence intervals, shown in the dataframe above, do not include zero.  Since the coefficient on the AR term is `r round(q2.mod.2$coef[1],2)`, the characteristic equation for the AR process is (1-`r round(q2.mod.2$coef[1],2)`B), which has a root > 1 and is therefore stationary.  The roots of the characteristic equation for the MA component are also shown in the dataframe above-- since they are also greater than 1, the MA process is invertible.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Box-Ljung test fails to reject the null hypothesis of no correlation in the residuals.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model can be used for forecasting.-->
+
+Next, series 3 and 4 are modeled with a VAR model.  The EDTSA indicated growing variance in series 3 (see Appendix), so a log transform on that series is first performed in order to stabilize the variance.  The VARselect function is used to identify an optimal VAR model order.  Both a constant and a trend are included in the search because it was noted earlier that all series have both a trend and a non-zero mean.
+```{r eval=FALSE, include=FALSE}
+#VARseries <- cbind(series3, series4)
+#VARseries <- cbind(series1, series3, series4)
+#VARseries <- cbind(log(series1), log(series3), series4)
+
+#VARseries <- cbind(log(series3), series4)
+#VARselect(VARseries, lag.max=10, type="both")
+
+#series1<-window(series1,st=c(1983,1),fr=12)
+#series3<-window(series3,st=c(1983,1),fr=12)
+#series4<-window(series4,st=c(1983,1),fr=12)
+#VARselect(cbind(series1,series3,series4), lag.max=8, type="both")
+```
+```{r collapse=TRUE, eval=FALSE, include=FALSE}
+VARselect(cbind(log(series3),series4), lag.max=4, type="both")
+```
+```{r collapse=TRUE}
+VARselect(cbind(log(series3),series4), lag.max=4, type="both")$selection
+```
+
+The information criteria in the VARselect function indicate that a VAR(1) or a VAR(3) would be appropriate (these values are omitted here for conciseness).  Since there is an interest in forecasting, a more parsimonious VAR(1) model was first fitted-- this model showed good performance, however, a Portmanteau test for this model showed marginal evidence of autocorrelation in the residuals.  Therefore, a VAR(3) model is selected to model series 3 and 4, which in addition to having good performance also fails to reject the null hypothesis of no autocorrelation in its residuals (via the Portmanteau test).
+<!--The information criteria in the VARselect function indicate that a VAR(4) or a VAR(7) would be appropriate.  Since there is an interest in forecasting, a more parsimonious VAR(4) model was first fitted-- this model showed good performance, however, a Portmanteau test for this model rejected the null hypothesis of no autocorrelation in the residuals.  Therefore, a VAR(7) model is selectedd to model series 3 and 4, which in addition to good performance also fails to reject the null hypothesis of no autocorrelation in its residuals (via the Portmanteau test).-->
+
+```{r eval=FALSE, include=FALSE}
+var.fit<-VAR(cbind(log(series3),series4),p=3,type="both");#summary(var.fit)$varresult;round(roots(var.fit),2);#summary(var.fit)
+#var.fit<-VAR(cbind(diff(log(series3)),diff(series4)),p=3,type="const");#summary(var.fit)$varresult;round(roots(var.fit),2);
+summary(var.fit)
+#noticed increasing variance in residuals for series 1 and 2 without a log transforms
+#VAR(2) with and without log transform both had autocorrelation in residuals
+#VAR(2) with log transform on series 1 and 2 had marginal evidence of autocorrelation
+#only VAR(3) with log transform on series 1 and 2, and no log transform on series 4 produced no autocorrelation in the residuals
+#var.fit<-VAR(cbind(log(series3),series4),p=7,type="both")
+```
+```{r collapse=TRUE}
+var.fit<-VAR(cbind(log(series3),series4),p=3,type="both");summary(var.fit)$varresult$log.series3.$coefficients
+summary(var.fit)$varresult$series4$coefficients;round(roots(var.fit),2)
+```
+
+The roots() function above calculates the eigenvalues of the model's companion matrix-- since these are less than 1 in this case, this model is considered to be stable.  The model estimates are also displayed above.  For the log transform of series 3, its first 2 lags, as well as the first lag of series 4, have significant p-values.  For series 4, its own first lag, as well as the 3rd lag of the log transform of series 3, have significant p-values.  This is an interesting result and it would be interesting to further study whether series 3 has a causal effect on series 4.  The constant and trend terms for both series also have significant p-values.
+
+```{r fig.width=8, fig.height=3.5, warning=FALSE, collapse=TRUE}
+var.fit.residuals<-resid(var.fit);par(mfrow=c(2,1));for(a in 1:2){
+  tsplot(var.fit.residuals[,a],paste("VAR Model Residuals for Series",a+2),1,0,0)}
+print(paste("Portmanteau Test P-Value:",serial.test(var.fit,lags.pt=12,type="PT.adjusted")$serial$p.value))
+print(paste("Multivariate Jarque-Bera Test P-Value:",
+            normality.test(var.fit,multivariate.only=TRUE)$jb.mul$JB$p.value))
+```
+The above time plots, histograms, ACF plots, and PACF plots are for the residuals of the VAR(3) model.  Both sets of plots indicate that the VAR(3) model residuals could be a realization of a white noise process.  Their Augmented Dickey-Fuller test results indicate that the residuals are stationary, and the Portmanteau and Jarque-Bera tests on the VAR model fail to reject the null hypotheses that the residuals have no autocorrelation and that the residuals are normally distributed, respectively.  Since the model is stable and since its residuals are a realization of a white noise process, it is next used for forecasting.
+
+***Forecasting***
+<!--null hypothesis: no autocorrelation-->
+```{r eval=FALSE, include=FALSE}
+serial.test(var.fit, lags.pt=12, type="PT.adjusted")
+normality.test(var.fit, multivariate.only = TRUE)
+```
+<!--include residuals-->
+<!--calculate RMSE-->
+```{r fig.width=8, fig.height=4, collapse=TRUE, eval=FALSE, include=FALSE}
+fit.pr<-predict(var.fit,n.ahead=24,ci=0.95);q2.pred.1<-get.fcst(q2.mod.1,24,0.95,1993,1,12)
+q2.pred.2<-get.fcst(q2.mod.2,24,0.95,1993,1,12);q2.pred.3<-ts(fit.pr$fcst$log.series3.,st=c(1993,1),fr=12)
+q2.pred.4<-ts(fit.pr$fcst$series4,st=c(1993,1),fr=12);par(mfrow=c(2,2))
+ts.plot(cbind(series1,exp(q2.pred.1$pred),exp(q2.pred.1$l),exp(q2.pred.1$u)),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 1 Forecast",ylim=c(0,100))
+ts.plot(cbind(series2,q2.pred.2$pred,q2.pred.2$l,q2.pred.2$u),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 2 Forecast",ylim=c(0,100))
+ts.plot(cbind(series3,exp(q2.pred.3[,1]),exp(q2.pred.3[,2]),exp(q2.pred.3[,3])),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 3 Forecast",ylim=c(0,100))
+ts.plot(cbind(series4,q2.pred.4[,1],q2.pred.4[,2],q2.pred.4[,3]),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 4 Forecast",ylim=c(0,100))
+```
+```{r fig.width=8, fig.height=5, collapse=TRUE}
+fit.pr<-predict(var.fit,n.ahead=24,ci=0.95);q2.pred.1<-get.fcst(q2.mod.1,24,0.95,1993,1,12)
+q2.pred.2<-get.fcst(q2.mod.2,24,0.95,1993,1,12);q2.pred.3<-ts(fit.pr$fcst$log.series3.,st=c(1993,1),fr=12)
+q2.pred.4<-ts(fit.pr$fcst$series4,st=c(1993,1),fr=12);par(mfrow=c(2,2))
+ts.plot(cbind(series1,exp(q2.pred.1$pred),exp(q2.pred.1$l),exp(q2.pred.1$u),q2Test[,1]),
+        lty=c(1,2,3,3,1),col=c(1,2,3,3,1),main="Series 1 Forecast",ylim=c(0,100))
+ts.plot(cbind(series2,q2.pred.2$pred,q2.pred.2$l,q2.pred.2$u,q2Test[,2]),
+        lty=c(1,2,3,3,1),col=c(1,2,3,3,1),main="Series 2 Forecast",ylim=c(0,100))
+ts.plot(cbind(series3,exp(q2.pred.3[,1]),exp(q2.pred.3[,2]),exp(q2.pred.3[,3]),q2Test[,3]),
+        lty=c(1,2,3,3,1),col=c(1,2,3,3,1),main="Series 3 Forecast",ylim=c(0,100))
+ts.plot(cbind(series4,q2.pred.4[,1],q2.pred.4[,2],q2.pred.4[,3],q2Test[,4]),
+        lty=c(1,2,3,3,1),col=c(1,2,3,3,1),main="Series 4 Forecast",ylim=c(0,100))
+```
+The above plot shows the simultaneous forecasts for 1993 and 1994 (red), after fitting to the series (black).  The model residuals are omitted here due to the small size of the plots-- the 1993 RMSEs from back-testing are: `r round(sqrt((sum((exp(window(q2.pred.1[,1], st=c(1993,1), end=c(1993,12), fr=12))-window(q2Test[,1], st=c(1993,1), fr=12))^2))/12),2)`, `r round(sqrt((sum((window(q2.pred.2[,1], st=c(1993,1), end=c(1993,12), fr=12)-window(q2Test[,2], st=c(1993,1), fr=12))^2))/12),2)`, `r round(sqrt((sum((exp(window(q2.pred.3[,1], st=c(1993,1), end=c(1993,12), fr=12))-window(q2Test[,3], st=c(1993,1), fr=12))^2))/12),2)`, and `r round(sqrt((sum((window(q2.pred.4[,1], st=c(1993,1), end=c(1993,12), fr=12)-window(q2Test[,4], st=c(1993,1), fr=12))^2))/12),2)`, for series 1, 2, 3, and 4, respectively.  The higher RMSE for series 1 and 3 are due to a small drop in the actual observations in August of 1993.  95% confidence bounds on the forecasts are shown in green-- the actual observations in 1993 fall within these bounds for all series, so this model is able to forecast well.  Series 2 has a flat forecast, while the other series are forecasted to continue increasing.  Note that the 95% confidence intervals also show that for both series 1 and 2, a decrease in the trend cannot be ruled out.
+
+<!--Many other modeling approaches were investigated, and the notable alternatives are included in the Appendix.-->
+```{r eval=FALSE, include=FALSE}
+#1
+test1<-exp(window(q2.pred.1[,1], st=c(1993,1), end=c(1993,12), fr=12))
+test2<-window(q2Test[,1], st=c(1993,1), fr=12)
+sqrt((sum((test1-test2)^2))/12)
+
+#2
+test1<-window(q2.pred.2[,1], st=c(1993,1), end=c(1993,12), fr=12)
+test2<-window(q2Test[,2], st=c(1993,1), fr=12)
+sqrt((sum((test1-test2)^2))/12)
+
+#3
+test1<-exp(window(q2.pred.3[,1], st=c(1993,1), end=c(1993,12), fr=12))
+test2<-window(q2Test[,3], st=c(1993,1), fr=12)
+sqrt((sum((test1-test2)^2))/12)
+
+#4
+test1<-window(q2.pred.4[,1], st=c(1993,1), end=c(1993,12), fr=12)
+test2<-window(q2Test[,4], st=c(1993,1), fr=12)
+sqrt((sum((test1-test2)^2))/12)
+```
+<!--One alternative fits a seasonal ARMA on the log transformed, first differenced series (i.e. ARIMA(0,1,0)(1,0,2)[4])-- this approach resulted in slightly better in-sample fit, but also less parsimony and evidence of correlation in the model residuals.  Another modeling approach fits a seasonal ARMA on the seasonally differenced series (i.e. ARIMA(2,0,0)(2,1,0)[4])-- such an approach satisfied all of the ARIMA model assumptions (including normality of its residuals), however, its in-sample fit and back-testing results were significantly worse and the resulting models were thus unfavorable for forecasting.-->
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+q2.mod.1.prediction <- predict(q2.mod.1, n.ahead=24, ci=0.95)
+q2.mod.1.prediction.preds <- ts(q2.mod.1.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.1.prediction.uci <- exp(q2.mod.1.prediction.preds + 2*q2.mod.1.prediction$se)
+q2.mod.1.prediction.lci <- exp(q2.mod.1.prediction.preds - 2*q2.mod.1.prediction$se)
+
+q2.mod.2.prediction <- predict(q2.mod.2, n.ahead=24, ci=0.95)
+q2.mod.2.prediction.preds <- ts(q2.mod.2.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.2.prediction.uci <- exp(q2.mod.2.prediction.preds + 2*q2.mod.2.prediction$se)
+q2.mod.2.prediction.lci <- exp(q2.mod.2.prediction.preds - 2*q2.mod.2.prediction$se)
+
+series3.pred <- ts(exp(fit.pr$fcst$log.series3.[,1]), st=c(1993,1), fr=12)
+series3.pred.lci <- ts(exp(fit.pr$fcst$log.series3.[,2]), st=c(1993,1), fr=12)
+series3.pred.uci <- ts(exp(fit.pr$fcst$log.series3.[,3]), st=c(1993,1), fr=12)
+
+series4.pred <- ts(fit.pr$fcst$series4[,1], st=c(1993,1), fr=12)
+series4.pred.lci <- ts(fit.pr$fcst$series4[,2], st=c(1993,1), fr=12)
+series4.pred.uci <- ts(fit.pr$fcst$series4[,3], st=c(1993,1), fr=12)
+
+par(mfrow=c(2,2))
+ts.plot(cbind(series1,exp(q2.mod.1.prediction.preds),q2.mod.1.prediction.lci,q2.mod.1.prediction.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 1 Forecast",ylim=c(0,100))
+ts.plot(cbind(series2,exp(q2.mod.2.prediction.preds),q2.mod.2.prediction.lci,q2.mod.2.prediction.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 2 Forecast",ylim=c(0,100))
+ts.plot(cbind(series3,series3.pred,series3.pred.lci,series3.pred.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 3 Forecast",ylim=c(0,100))
+ts.plot(cbind(series4,series4.pred,series4.pred.lci,series4.pred.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 4 Forecast",ylim=c(0,100))
+```
+```{r eval=FALSE, include=FALSE}
+#ts.plot(cbind(series1, exp(fit.pr$fcst$log.series1.[,1]), exp(fit.pr$fcst$log.series1.[,2]), exp(fit.pr$fcst$log.series1.[,3])), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(exp(fit.pr$fcst$log.series3.[,1]), exp(fit.pr$fcst$log.series3.[,2]), exp(fit.pr$fcst$log.series3.[,3])), lty=c(1,2,3), col=c(1,2,3))
+lines(series3)
+plot(cbind(exp(fit.pr$fcst$log.series3.[,1]), exp(fit.pr$fcst$log.series3.[,2]), exp(fit.pr$fcst$log.series3.[,3])), lty=c(1,2,3), col=c(1,2,3))
+
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series2, exp(fit.pr$fcst$log.series2.[,1]), exp(fit.pr$fcst$log.series2.[,2]), exp(fit.pr$fcst$log.series2.[,3])), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(exp(fit.pr$fcst$log.series2.[,1]), exp(fit.pr$fcst$log.series2.[,2]), exp(fit.pr$fcst$log.series2.[,3])), lty=c(1,2,3), col=c(1,2,3))
+lines(series2)
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series3, exp(q2.mod.3.prediction.preds), exp(q2.mod.3.prediction.uci), exp(q2.mod.3.prediction.lci)), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series3, exp(q2.mod.3.prediction.preds), exp(q2.mod.3.prediction.uci), exp(q2.mod.3.prediction.lci)), lty=c(1,2,3,3), col=c(1,2,3,3))
+legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series4, fit.pr$fcst$series4[,1], fit.pr$fcst$series4[,2], fit.pr$fcst$series4[,3]), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(fit.pr$fcst$series4[,1], fit.pr$fcst$series4[,2], fit.pr$fcst$series4[,3]), lty=c(1,2,3), col=c(1,2,3))
+lines(series4)
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+```
+
+
+
+<!--why exactly do we look at the pairwise residuals?-->
+<!--basic model has 2 roots==1, but the adf.test of the residuals rejects the null hypothesis of a unit root-->
+<!--for VAR and VARselect functions, do you include a constant when the means of the series are different?  do you include a trend when they don't share a stochastic trend?-->
+<!--or do you include a constant when the mean !=0 and a trend when there is a trend?-->
+<!--include box.test and adf.test for each of the 4 series-->
+<!--try differencing each series and then fitting a VAR model-->
+<!--simulations at end to check on final formula-->
+<!--don't forget about smoothing (moving average, polynomial/periodic regression, spline, kernel)-->
+
+# Appendix
+
+## Q1 Additional EDTSA
+Since the data for question 1 is so small, all of it can be displayed to check its integrity:
+```{r}
+ecompctnsa$DATE
+ecompctnsa$ECOMPCTNSA
+```
+The following plots show the increasing variance of the series that led to a log transform.
+```{r}
+tsplot(diff(ecompctnsa.ts), "Series after 1st Difference", 0, 0, 0)
+```
+
+The following plots show the strong seasonality of the series.
+```{r}
+tsplot(diff(log(ecompctnsa.ts)), "Series after Log Transform and 1st Difference", 0, 0, 0)
+```
+
+## Q1 Alternate Modeling Approaches
+
+<!--***I've identified at least a few approaches we can start with:***
+
+1) fitting a seasonal AR model to the seasonally differenced series (AIC/BIC not the best so far)-- see Appendix
+
+2) fitting an AR model to a seasonally differenced log transform of the series (not good so far)-- see Appendix
+
+3) fitting a seasonal ARMA model to a 1st differenced log transform of the series (still needs some work, but potentially very good-- parameter search so far has good results)-- see Appendix
+
+4) fitting an ARMA model to a 1st differenced and seasonally differenced log transform of the series (good so far)-- this is the currently selected model
+
+5) detrending the series with lm() and modeling the residuals (not started, but one rationale could be that the series seems to have a strong linear trend, and that combined with an ARMA model for the residuals could also lead to good prediction)-->
+
+### Alternative 1: seasonal difference and AR/SAR model
+```{r}
+tsplot(diff(ecompctnsa.ts, lag=4), title="seasonal_diff", 1, 1, 0)
+```
+
+After the seasonal difference, the series shows high persistence, and some lingering seasonal effects.  The gradual decline in the ACF and spike at lag 1 in the PACF suggest an AR(1) model.
+
+```{r eval=FALSE, include=FALSE}
+search.arma.params <- function(time.series) {
+  for (p in 0:2) {
+    for (P in 0:2) {
+      mod <- Arima(time.series, order = c(p,0,0), seasonal = list(order = c(P,1,0),4), method = "ML")
+      print(c(p, P, mod$aic, mod$bic, Box.test(mod$residuals, type="Ljung-Box")$p.value))
+    }
+  }
+}
+search.arma.params(ecompctnsa.ts)
+```
+
+<!--An Arima(2,0,0)(0,1,0)_4, Arima(2,0,0)(1,1,0)_4, or Arima(2,0,0)(2,1,0)_4 look like possible candidates.-->
+
+```{r}
+search.sarima.params(ecompctnsa.ts, 4, 2, 0, 4, 2, 1, 4)
+#search.sarima.params(log(ecompctnsa.ts), 4, 2, 0, 4, 2, 1, 4)
+```
+All of the above models seem to be equally good candidates.
+```{r eval=FALSE, include=FALSE}
+q1.mod <- Arima(ecompctnsa.ts, order=c(2,0,0), seasonal=list(order=c(2,1,0),4), method="ML")
+q1.mod;
+tsplot(q1.mod$residuals, "residuals", 1, 1, 1)
+```
+
+```{r}
+q1.mod <- Arima(ecompctnsa.ts, order=c(2,0,0), seasonal=list(order=c(1,1,2),4), method="ML")
+q1.mod;
+tsplot(q1.mod$residuals, "residuals", 1, 1, 1)
+```
+```{r fig.width=8, fig.height=4}
+q1.pred<-get.fcst(q1.mod,12,0.95,2015,1,4)
+ts.plot(cbind(q1.original.ts,(q1.pred$pred),(q1.pred$u),(q1.pred$l),
+              q1.original.ts-(ts.union(q1.mod$fitted, q1.pred$pred))),lty=c(1,2,3,3,4,4),
+        col=c(1,2,3,3,4,4),main="Forecast of Quarterly E-Commerce Retail Sales in 2015-2017")
+legend(x=2000,y=14,legend=c("original","predicted","95% confidence interval limit","residuals"),
+       lty=c(1,2,3,4),col=c(1,2,3,4))
+```
+The model diagnostics show that this model passes all ARIMA assumptions, however both its relatively weak in-sample fit and back-testing results show that this model is less favorable for forecasting than the one selected.
+
+<!--### Approach 2: log transform and seasonal difference (no good so far)
+```{r eval=FALSE, include=FALSE}
+plot.ts(log(ecompctnsa.ts))
+par(mfrow=c(2,2))
+plot.ts(diff(log(ecompctnsa.ts), lag=4))
+hist(diff(log(ecompctnsa.ts), lag=4))
+acf(diff(log(ecompctnsa.ts), lag=4))
+pacf(diff(log(ecompctnsa.ts), lag=4))
+```
+
+The ACF and PACF of the seasonally differenced log transform of the series suggest a seasonal AR model.
+
+```{r eval=FALSE, include=FALSE}
+search.arma.params <- function(time.series) {
+  for (P in 0:8) {
+    mod <- Arima(log(time.series), order = c(0,0,0), seasonal = list(order = c(P,1,0),4), method = "ML")
+    print(c(P, mod$aic, mod$bic, Box.test(mod$residuals, type="Ljung-Box")$p.value))
+  }
+}
+search.arma.params(ecompctnsa.ts)
+```
+
+None of the above models had a good AIC/BIC, and all rejected the null hypothesis that the residuals are uncorrelated.-->
+
+### Alternative 2: seasonal ARMA on the 1st differenced log transform
+
+<!--***this approach still needs some work, but is potentially very good-- the parameter search so far has good results***
+***less parsimonious, evidence of correlation in the residuals***-->
+
+```{r}
+#search.sarima.params(log(ecompctnsa.ts),4,4,1,4,4,0,4)
+search.sarima.params(log(ecompctnsa.ts),4,3,1,3,3,0,3)
+```
+
+```{r}
+mod.3<-Arima(log(ecompctnsa.ts),order=c(0,1,0),seasonal=list(order=c(1,0,2),4),method="ML");mod.3
+```
+```{r fig.weidth=8, fig.height=4, warning=FALSE}
+tsplot(mod.3$residuals, "Model Residuals", 1, 1, 1)
+abs(polyroot(c(1, mod.3$coef[1])))
+data.frame(roots=abs(polyroot(c(1, mod.3$coef[2], mod.3$coef[3]))), 
+           Phi1.CI=mod.3$coef[1] + c(-2,2)*sqrt(mod.3$var.coef)[1], 
+           Theta1.CI=mod.3$coef[2] + c(-2,2)*sqrt(mod.3$var.coef)[5],
+           Theta2.CI=mod.3$coef[3] + c(-2,2)*sqrt(mod.3$var.coef)[9])
+shapiro.test(mod.3$residuals)
+```
+```{r fig.width=8, fig.height=4}
+mod.3.prediction <- predict(mod.3, n.ahead=12)
+mod.3.prediction.preds <- ts(mod.3.prediction$pred, st=c(2015,1), fr=4)
+mod.3.prediction.uci<-mod.3.prediction.preds+2*mod.3.prediction$se
+mod.3.prediction.lci<-mod.3.prediction.preds-2*mod.3.prediction$se
+ts.plot(cbind(q1.original.ts, exp(mod.3.prediction.preds), exp(mod.3.prediction.uci), exp(mod.3.prediction.lci), 
+              q1.original.ts-exp(ts.union(mod.3$fitted, mod.3.prediction.preds))),lty=c(1,2,3,3,4,4), 
+        col=c(1,2,3,3,4,4),main="Forecast of Quarterly E-Commerce Retail Sales in 2015-2017")
+legend(x=2000,y=14,legend=c("original","predicted","95% confidence interval limit","residuals"),
+       lty=c(1,2,3,4),col=c(1,2,3,4))
+```
+This model had good in-sample fit, but was less parsimonious and had correlated residuals.
+
+```{r eval=FALSE, include=FALSE}
+search.arma.params <- function(time.series) {
+  for (p in 0:4) {
+    for (q in 0:4) {
+      for (P in 0:4) {
+        for (Q in 0:4) {
+          mod <- Arima(log(time.series), order = c(p,1,q), seasonal = list(order = c(P,0,Q),4), method = "ML")
+          print(c(p, q, P, Q, mod$aic, mod$bic, Box.test(mod$residuals, type="Ljung-Box")$p.value))
+        }
+      }
+    }
+  }
+}
+search.arma.params(ecompctnsa.ts)
+```
+
+Interestingly, after a log transformation, first difference, and seasonal difference at a lag of 8, the series becomes white noise:
+
+```{r}
+tsplot(diff(diff(log(ecompctnsa.ts)), lag=8), "log, 1st diff, seasonal diff at lag 8", 1, 1, 1)
+```
+<!--
+## Q1 Other Scratchwork
+```{r eval=FALSE, include=FALSE}
+#test of final model formula:
+#set.seed(8); set.seed(20); set.seed(47)
+set.seed(20)
+Theta.1 <- -0.73; Theta.2 <- 0.39
+#Theta.1 <- 0.73; Theta.2 <- -0.39
+n=69
+x <- w <- rnorm(n, sd=0.005)
+x[1:9] <- log(ecompctnsa.ts[1:9])
+for (i in 9:n) {
+  x[i] <- x[i-1] + x[i-4] - x[i-5] + Theta.1*w[i-4] + Theta.2*w[i-8]
+}
+x.ts <- ts(x, start=c(1999,4), frequency=4)
+plot.ts(x.ts)
+lines(log(ecompctnsa.ts))
+```
+
+```{r eval=FALSE, include=FALSE}
+#q1.prediction <- predict(q1.backtest.mod, n.ahead=12)
+q1.prediction <- predict(q1.mod, n.ahead=12)
+q1.prediction.SEs <- q1.prediction$se
+q1.prediction.preds <- ts(q1.prediction$pred, st=c(2015,1), fr=4)
+
+q1.prediction.uci <- q1.prediction.preds + 2*q1.prediction.SEs
+q1.prediction.lci <- q1.prediction.preds - 2*q1.prediction.SEs
+
+#x[1:61] <- log(ecompctnsa.train)
+x[1:61] <- log(ecompctnsa.ts)
+for (i in 62:69) {
+  x[i] <- x[i-1] + x[i-4] - x[i-5] + Theta.1*w[i-4] + Theta.2*w[i-8]
+}
+x.ts <- ts(x, start=c(1999,4), frequency=4)
+
+ts.plot(cbind(log(ecompctnsa.ts)[55:69], x.ts[55:69]), lty=c(1,2), col=c(1,2))
+legend(x=2000, y=2, legend=c("original", "predicted"), lty=c(1,2), col=c(1,2))
+#should Q1 be de-trended, with the residuals modeled with SARIMA?
+```
+-->
+<!--use aic-->
+<!--use forecast errors-->
+```{r eval=FALSE, include=FALSE}
+#q1.mod <- Arima(log(ecompctnsa.ts), order = c(0,1,2), seasonal = list(order = c(0,1,0),2), method = "ML")
+#q1.mod
+#hist(q1.mod$residuals)
+```
+
+```{r eval=FALSE, include=FALSE}
+#no seasonal differencing
+q1.mod <- Arima(log(ecompctnsa.ts), order=c(4,1,0), seasonal=list(order=c(1,0,0),4), method="ML")
+q1.mod
+hist(q1.mod$residuals)
+acf(q1.mod$residuals)
+pacf(q1.mod$residuals)
+Box.test(q1.mod$residuals, type="Ljung-Box")
+```
+```{r eval=FALSE, include=FALSE}
+#no seasonal differencing
+q1.mod <- Arima(log(ecompctnsa.ts), order=c(0,1,0), seasonal=list(order=c(1,0,1),4), method="ML")
+q1.mod
+hist(q1.mod$residuals)
+acf(q1.mod$residuals)
+pacf(q1.mod$residuals)
+Box.test(q1.mod$residuals, type="Ljung-Box")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+#with seasonal differencing
+q1.mod <- Arima(log(ecompctnsa.ts), order = c(0,1,0), seasonal = list(order = c(4,1,0),4), method = "ML")
+q1.mod
+hist(q1.mod$residuals)
+acf(q1.mod$residuals)
+pacf(q1.mod$residuals)
+Box.test(q1.mod$residuals, type="Ljung-Box")
+```
+```{r eval=FALSE, include=FALSE}
+#with seasonal differencing
+q1.mod <- Arima(log(ecompctnsa.ts), order = c(0,1,0), seasonal = list(order = c(1,1,1),4), method = "ML")
+q1.mod
+hist(q1.mod$residuals)
+acf(q1.mod$residuals)
+pacf(q1.mod$residuals)
+Box.test(q1.mod$residuals, type="Ljung-Box")
+```
+```{r eval=FALSE, include=FALSE}
+#with seasonal differencing
+q1.mod <- Arima(log(ecompctnsa.ts), order = c(0,1,0), seasonal = list(order = c(0,1,2),4), method = "ML")
+q1.mod
+hist(q1.mod$residuals)
+acf(q1.mod$residuals)
+pacf(q1.mod$residuals)
+Box.test(q1.mod$residuals, type="Ljung-Box")
+```
+```{r eval=FALSE, include=FALSE}
+search.arma.params <- function(time.series) {
+  for (p in 0:4) {
+    for (q in 0:4) {
+      for (P in 0:4) {
+        for (Q in 0:4) {
+          mod <- Arima(log(time.series), order = c(p,1,q), seasonal = list(order = c(P,1,Q),4), method = "ML")
+          print(c(p, q, P, Q, mod$aic, mod$bic, Box.test(mod$residuals, type="Ljung-Box")$p.value))
+        }
+      }
+    }
+  }
+}
+search.arma.params(ecompctnsa.ts)
+```
+
+## Q2 Additional EDTSA
+The following function was used to check the integrity of the time variables (year and mon), and to produce summary statistics for the remaining variables.
+```{r include=FALSE, eval=FALSE}
+year.month.check <- rep(0,length(varData$year))
+iter <- 1
+for (a in 1947:2012) {
+  for (b in 1:12) {
+    year.check <- ifelse(test=varData$year[iter]==a, yes=0, no=1)
+    month.check <- ifelse(test=varData$mon[iter]==b, yes=0, no=1)
+    year.month.check[iter] <- year.check + month.check
+    iter <- iter + 1
+  }
+}
+summary(year.month.check); summary(varData[,3:6])
+print(paste("Series 1 Minimum Value:",min(varData$series1)))
+print(paste("Series 2 Minimum Value:",min(varData$series2)))
+print(paste("Series 3 Minimum Value:",min(varData$series3)))
+print(paste("Series 4 Minimum Value:",min(varData$series4)))
+```
+```{r}
+year.month.check <- rep(0,length(varData$year))
+iter <- 1
+for (a in 1947:1993) {
+  for (b in 1:12) {
+    year.check <- ifelse(test=varData$year[iter]==a, yes=0, no=1)
+    month.check <- ifelse(test=varData$mon[iter]==b, yes=0, no=1)
+    year.month.check[iter] <- year.check + month.check
+    iter <- iter + 1
+  }
+}
+summary(year.month.check); summary(varData[,3:6])
+print(paste("Series 1 Minimum Value:",min(varData$series1)))
+print(paste("Series 2 Minimum Value:",min(varData$series2)))
+print(paste("Series 3 Minimum Value:",min(varData$series3)))
+print(paste("Series 4 Minimum Value:",min(varData$series4)))
+```
+
+The following time plots and ACF plots show that the original series each have a strong increasing trend and are each highly persistent.
+```{r fig.width=8, fig.height=4}
+q2Data<-varData[varData$year<1993,]
+series1<-ts(q2Data$series1,start=c(1947,1),frequency=12)
+series2 <- ts(q2Data$series2, start=c(1947,1), frequency=12)
+series3 <- ts(q2Data$series3, start=c(1947,1), frequency=12)
+series4 <- ts(q2Data$series4, start=c(1947,1), frequency=12)
+allseries <- cbind(series1, series2, series3, series4)
+par(mfrow=c(2,4));for(num in 1:4){
+plot.ts(allseries[,num],ylab=paste("Series",num));acf(allseries[,num],main=paste("ACF of Series",num))}
+```
+
+The following plots display the original series in 4 segments in order to more closely examine their trends and select the data for training.
+```{r fig.width=8, fig.height=16}
+par(mfrow=c(4,1));ts.plot(allseries[1:138,]);ts.plot(allseries[139:276,])
+ts.plot(allseries[277:414,]);ts.plot(allseries[415:552,])
+```
+```{r fig.width=8, fig.height=8}
+par(mfrow=c(1,1));ts.plot(window(allseries, st=c(1983,1)))
+```
+
+The following plots show that in the shortened training data, each series is still highly persistent, with a strong increasing trend.  The time plots again show the close relationship between series 3 and series 4, especially in this time frame selected for training the model.
+```{r fig.width=8, fig.height=4}
+q2Data<-varData[varData$year<1993,]
+series1<-window(ts(q2Data$series1,start=c(1947,1),frequency=12), start=c(1983,1),frequency=12)
+series2 <- window(ts(q2Data$series2, start=c(1947,1), frequency=12), start=c(1983,1), frequency=12)
+series3 <- window(ts(q2Data$series3, start=c(1947,1), frequency=12), start=c(1983,1), frequency=12)
+series4 <- window(ts(q2Data$series4, start=c(1947,1), frequency=12), start=c(1983,1), frequency=12)
+allseries <- cbind(series1, series2, series3, series4)
+par(mfrow=c(2,4));for(num in 1:4){
+plot.ts(allseries[,num],ylab=paste("Series",num));acf(allseries[,num],main=paste("ACF of Series",num))}
+```
+
+```{r fig.width=8, fig.height=3, warning=FALSE, eval=FALSE, include=FALSE}
+#allseries<-window(allseries, st=c(1983,1), fr=12)
+par(mfrow=c(2,4));for(num in 1:4){plot.ts(diff(allseries[,num]),ylab=paste("Series",num))
+  acf(diff(allseries[,num]),main=paste("ACF of Series",num,"(after differencing)"))
+  print(paste("ADF Test P-Value for Series",num,"(after differencing):",
+              adf.test(diff(allseries[,num]))$p.value))}
+#allseries.diff <- allseries.diff[432:551,]
+```
+
+<!--The above time plots show each detrended series.  After first differencing, the Augmented Dickey-Fuller test is able to reject the null hypothesis of a unit root for each of the 4 series, and the cross-correlation between each differenced series can now be examined.  The increasing variance of series 1, 2, and 3 is also noted.-->
+
+```{r fig.width=8, fig.height=3, eval=FALSE, include=FALSE}
+#move to appendix
+series1<-window(q2Data[,1],start=c(1983,1),frequency=12);series2<-window(q2Data[,2],start=c(1983,1),frequency=12)
+series3<-window(q2Data[,3],start=c(1983,1),frequency=12);series4<-window(q2Data[,4],start=c(1983,1),frequency=12)
+allseries<-cbind(series1,series2,series3,series4);par(mfrow=c(2,4));for(num in 1:4){
+plot.ts(allseries[,num],ylab=paste("Series",num));acf(allseries[,num],main=paste("ACF of Series",num))}
+print(paste("ADF Test P-Value for Series 1 After January 1983:",adf.test(series1)$p.value))
+print(paste("ADF Test P-Value for Series 2 After January 1983:",adf.test(series2)$p.value))
+print(paste("ADF Test P-Value for Series 3 After January 1983:",adf.test(series3)$p.value))
+print(paste("ADF Test P-Value for Series 4 After January 1983:",adf.test(series4)$p.value))
+```
+
+```{r eval=FALSE, include=FALSE}
+acf(diff(allseries))
+```
+
+The following plots show the increasing variance in Series 1 that called for a log transformation to stabilize the variance.
+```{r fig.width=8, fig.heigh=4, warning=FALSE}
+tsplot(diff(series1), "series 1 after 1st diff", 0, 0, 0)
+```
+
+The following plots show the increasing variance in Series 3 that called for a log transformation to stabilize its variance.
+```{r fig.width=8, fig.heigh=4, warning=FALSE}
+tsplot(diff(series3), "series 3 after 1st diff", 0, 0, 0)
+```
+
+## Q2 Alternate Modeling Approaches
+
+### Approach 1: Arima for Series 1 and 2; VAR for Series 3 and 4 (using full data)
+```{r eval=FALSE, include=FALSE}
+#tsplot(diff(series1), "series1: 1st diff", 1, 1)
+#tsplot(diff(diff(log(series1)),12), "series1: seasonal diff", 1, 1)
+```
+```{r}
+series1<-ts(q2Data$series1,start=c(1947,1),frequency=12)
+series2 <- ts(q2Data$series2, start=c(1947,1), frequency=12)
+series3 <- ts(q2Data$series3, start=c(1947,1), frequency=12)
+series4 <- ts(q2Data$series4, start=c(1947,1), frequency=12)
+allseries <- cbind(series1, series2, series3, series4)
+```
+```{r fig.width=8, fig.height=4, warning=FALSE}
+tsplot(diff(log(series1)), "series1: log and 1st diff", 1, 1, 0)
+```
+
+Prior to modeling Series 1, a first difference is taken to remove the trend.  The plot of the differenced series, as well as subsequent model residuals, showed evidence of increasing variance, so a log transform is also taken in order to stabilize the variance.  The above time plot, histogram, ACF plot, and PACF plot are for series 1 after a log-transformed and first difference.  The spike in the PACF at lag 1 indicates an AR term, and spikes in the ACF and especially the PACF at lags 12 and 24 suggest the need for seasonal components as well.  A parameter search is therefore focused on non-seasonal AR and MA components up to order 1, and seasonal AR and MA components up to order 2.
+
+```{r eval=FALSE, include=FALSE, fig.width=8, fig.height=5}
+par(mfrow=c(4,4)); for (lag.level in -1:-16) {
+  lagged.intersection <- ts.intersect((diff(log(series1))), lag(diff(log(series1)), lag.level))
+  plot(as.vector(lagged.intersection[,2]), as.vector(lagged.intersection[,1]), main="", 
+       xlab="Lagged Series", ylab="Original"); title(paste("Lag:",lag.level))
+  abline(reg=lm(lagged.intersection[,1]~lagged.intersection[,2]))}
+```
+```{r eval=FALSE, include=FALSE}
+#search.sarima.params(series1,12,2,1,2,1,0,1)
+#search.sarima.params(log(series1),12,2,1,2,2,0,1)
+#search.sarima.params(log(series1),12,2,1,2,1,0,2)
+```
+```{r eval=FALSE}
+search.sarima.params(log(series1),12,1,1,1,2,0,2)
+```
+
+An ARIMA(1,1,0)(0,0,2)_12 model is the best candidate in terms of both AIC and BIC, and a Ljung-Box test on its residuals fails to reject the null hypothesis of no correlation.
+
+```{r eval=FALSE, include=FALSE}
+#q2.mod.1 <- Arima(series1, order=c(1,1,1), seasonal=list(order=c(1,0,1),12), method="ML")
+#q2.mod.1 <- Arima(log(series1), order=c(0,1,1), seasonal=list(order=c(1,0,1),12), method="ML")
+```
+
+```{r warning=FALSE, fig.width=8, fig.height=4}
+q2.mod.1 <- Arima(log(series1),order=c(1,1,0),seasonal=list(order=c(0,0,2),12),method="ML");q2.mod.1
+tsplot(q2.mod.1$residuals, "Series 1 Model Residuals", 1, 1, 1)
+data.frame(sma.roots=abs(polyroot(c(1,q2.mod.1$coef[2],q2.mod.1$coef[3]))), 
+           phi1.CI=q2.mod.1$coef[1] + c(-2,2)*sqrt(q2.mod.1$var.coef)[1],
+           Theta1.CI=q2.mod.1$coef[2] + c(-2,2)*sqrt(q2.mod.1$var.coef)[5], 
+           Theta2.CI=q2.mod.1$coef[3] + c(-2,2)*sqrt(q2.mod.1$var.coef)[9])
+```
+<!--Arima(0,1,1)(1,0,2)_12 also very good-->
+The series 1 model summary shows that each of the coefficients is statistically significant-- their 95% confidence intervals, shown in the dataframe above, do not include zero.  Since the coefficient on the AR term is `r round(q2.mod.1$coef[1],2)`, the characteristic equation for the AR process is (1-`r round(q2.mod.1$coef[1],2)`B), which has a root > 1 and is therefore stationary.  The roots of the characteristic equation for the seasonal MA component are also shown in the dataframe above-- since they are also greater than 1, the seasonal MA process is invertible.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Box-Ljung test fails to reject the null hypothesis of no correlation in the residuals.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model can be used for forecasting.
+
+Similar transformations are made to series 2 prior to modeling:
+```{r eval=FALSE, include=FALSE}
+#tsplot(diff(series2), "series2: 1st diff", 1, 1)
+```
+```{r fig.width=8, fig.height=4}
+tsplot(diff(log(series2)), "series2: 1st diff", 1, 1, 0)
+```
+Prior to modeling Series 2, a first difference is taken to remove the trend.  The plot of the differenced series, as well as subsequent model residuals, showed evidence of increasing variance, so a log transform is also taken in order to stabilize the variance.  The above time plot, histogram, ACF plot, and PACF plot are for series 2 after a log-transformation and first difference.  There are no clear patterns in the ACF and PACF graphs-- only small spikes at a lag of 1 in both graphs, so the following parameter search focuses on the addition of non-seasonal AR and MA components up to order 2.  It is notable that the small spikes at lags 12 and 24 are almost significant, suggesting that seasonal components may be helpful.  A model that included seasonal components was tested-- the AIC and BIC were improved, however, this improvement was only minor and we therefore omit seasonal components for greater model parsimony, which is favorable for forecasting.
+<!--search.sarima.params(log(series2),12,2,1,2,0,0,2)-->
+```{r}
+search.sarima.params(log(series2),12,2,1,2,0,0,0)
+```
+In this parameter search, an ARIMA(1,1,2)(0,0,0)_12 model is the best candidate in terms of both AIC and BIC, and a Ljung-Box test on its residuals fails to reject the null hypothesis of no correlation.
+<!--q2.mod.2 <- Arima(series2, order=c(1,1,2), seasonal=list(order=c(0,0,0),12), method="ML")-->
+<!--q2.mod.2<-Arima(log(series2),order=c(1,1,2),seasonal=list(order=c(0,0,2),12),method="ML");q2.mod.2-->
+```{r fig.width=8, fig.height=4, warning=FALSE}
+q2.mod.2<-Arima(log(series2),order=c(1,1,2),seasonal=list(order=c(0,0,0),12),method="ML");q2.mod.2
+tsplot(q2.mod.2$residuals, "Series 2 Model Residuals", 1, 1, 1)
+data.frame(sma.roots=abs(polyroot(c(1,q2.mod.2$coef[2],q2.mod.2$coef[3]))), 
+           phi1.CI=q2.mod.2$coef[1] + c(-2,2)*sqrt(q2.mod.2$var.coef)[1],
+           theta1.CI=q2.mod.2$coef[2] + c(-2,2)*sqrt(q2.mod.2$var.coef)[5], 
+           theta2.CI=q2.mod.2$coef[3] + c(-2,2)*sqrt(q2.mod.2$var.coef)[9])
+```
+The series 2 model summary shows that each of the coefficients is statistically significant-- their 95% confidence intervals, shown in the dataframe above, do not include zero.  Since the coefficient on the AR term is `r round(q2.mod.2$coef[1],2)`, the characteristic equation for the AR process is (1-`r round(q2.mod.2$coef[1],2)`B), which has a root > 1 and is therefore stationary.  The roots of the characteristic equation for the MA component are also shown in the dataframe above-- since they are also greater than 1, the MA process is invertible.  The time plot, histogram, ACF plot, and PACF plot of the residuals resemble a realization of a white noise process, and as mentioned previously, the Box-Ljung test fails to reject the null hypothesis of no correlation in the residuals.  Since the residuals resemble a white noise process, and since the stationarity and invertibility conditions are satisfied, this model can be used for forecasting.
+
+Next, series 3 and 4 are modeled with a VAR model.  The EDTSA indicated growing variance in series 3, so a log transform on that series is performed in order to stabilize the variance.  The VARselect function is used to identify an optimal VAR modle order.  Both a constant and a trend are included in the search because it was noted earlier that all series have both a trend and a non-zero mean.
+```{r eval=FALSE, include=FALSE}
+#VARseries <- cbind(series3, series4)
+#VARseries <- cbind(series1, series3, series4)
+#VARseries <- cbind(log(series1), log(series3), series4)
+
+#VARseries <- cbind(log(series3), series4)
+#VARselect(VARseries, lag.max=10, type="both")
+```
+```{r}
+VARselect(cbind(log(series3),series4), lag.max=8, type="both")
+#VARselect(cbind(series1,series3,series4), lag.max=8, type="both")
+```
+
+The information criteria in the VARselect function indicate that a VAR(4) or a VAR(7) would be appropriate.  Since there is an interest in forecasting, a more parsimonious VAR(4) model was first fitted-- this model showed good performance, however, a Portmanteau test for this model rejected the null hypothesis of no autocorrelation in the residuals.  Therefore, a VAR(7) model is selectedd to model series 3 and 4, which in addition to good performance also fails to reject the null hypothesis of no autocorrelation in its residuals (via the Portmanteau test).
+
+```{r eval=FALSE, include=FALSE}
+var.fit<-VAR(cbind(log(series3),series4),p=7,type="both");summary(var.fit)$varresult;round(roots(var.fit),2);#summary(var.fit)
+#var.fit<-VAR(cbind(diff(log(series3)),diff(series4)),p=3,type="const");#summary(var.fit)$varresult;round(roots(var.fit),2);
+#noticed increasing variance in residuals for series 1 and 2 without a log transforms
+#VAR(2) with and without log transform both had autocorrelation in residuals
+#VAR(2) with log transform on series 1 and 2 had marginal evidence of autocorrelation
+#only VAR(3) with log transform on series 1 and 2, and no log transform on series 4 produced no autocorrelation in the residuals
+```
+```{r}
+var.fit<-VAR(cbind(log(series3),series4),p=7,type="both")
+summary(var.fit)$varresult$log.series3.$coefficients
+summary(var.fit)$varresult$series4$coefficients;round(roots(var.fit),2)
+```
+
+The model summary shows that the roots of the characteristic equation are all less than unity, indicating that the transformed model is stationary.
+
+```{r fig.width=8, fig.height=4}
+var.fit.residuals<-resid(var.fit);par(mfrow=c(2,1));for(a in 1:2){
+  tsplot(var.fit.residuals[,a],paste("Series",a+2,"Residuals"),1,1,1)}
+```
+<!--null hypothesis: no autocorrelation-->
+```{r}
+serial.test(var.fit, lags.pt=12, type="PT.adjusted")
+```
+```{r eval=FALSE, include=FALSE}
+normality.test(var.fit, multivariate.only = TRUE)
+```
+
+<!--
+```{r eval=FALSE, include=FALSE}
+fit.pr<-predict(var.fit,n.ahead=24,ci=0.95);q2.pred.1<-get.fcst(q2.mod.1,24,0.95,1993,1,12)
+q2.pred.2<-get.fcst(q2.mod.2,24,0.95,1993,1,12);q2.pred.3<-ts(fit.pr$fcst$log.series3.,st=c(1993,1),fr=12)
+q2.pred.4<-ts(fit.pr$fcst$series4,st=c(1993,1),fr=12);par(mfrow=c(2,2))
+ts.plot(cbind(series1,exp(q2.pred.1$pred),exp(q2.pred.1$l),exp(q2.pred.1$u)),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 1 Forecast",ylim=c(0,100))
+ts.plot(cbind(series2,exp(q2.pred.2$pred),exp(q2.pred.2$l),exp(q2.pred.2$u)),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 2 Forecast",ylim=c(0,100))
+ts.plot(cbind(series3,exp(q2.pred.3[,1]),exp(q2.pred.3[,2]),exp(q2.pred.3[,3])),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 3 Forecast",ylim=c(0,100))
+ts.plot(cbind(series4,q2.pred.4[,1],q2.pred.4[,2],q2.pred.4[,3]),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 4 Forecast",ylim=c(0,100))
+```
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+q2.mod.1.prediction <- predict(q2.mod.1, n.ahead=24, ci=0.95)
+q2.mod.1.prediction.preds <- ts(q2.mod.1.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.1.prediction.uci <- exp(q2.mod.1.prediction.preds + 2*q2.mod.1.prediction$se)
+q2.mod.1.prediction.lci <- exp(q2.mod.1.prediction.preds - 2*q2.mod.1.prediction$se)
+
+q2.mod.2.prediction <- predict(q2.mod.2, n.ahead=24, ci=0.95)
+q2.mod.2.prediction.preds <- ts(q2.mod.2.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.2.prediction.uci <- exp(q2.mod.2.prediction.preds + 2*q2.mod.2.prediction$se)
+q2.mod.2.prediction.lci <- exp(q2.mod.2.prediction.preds - 2*q2.mod.2.prediction$se)
+
+series3.pred <- ts(exp(fit.pr$fcst$log.series3.[,1]), st=c(1993,1), fr=12)
+series3.pred.lci <- ts(exp(fit.pr$fcst$log.series3.[,2]), st=c(1993,1), fr=12)
+series3.pred.uci <- ts(exp(fit.pr$fcst$log.series3.[,3]), st=c(1993,1), fr=12)
+
+series4.pred <- ts(fit.pr$fcst$series4[,1], st=c(1993,1), fr=12)
+series4.pred.lci <- ts(fit.pr$fcst$series4[,2], st=c(1993,1), fr=12)
+series4.pred.uci <- ts(fit.pr$fcst$series4[,3], st=c(1993,1), fr=12)
+
+par(mfrow=c(2,2))
+ts.plot(cbind(series1,exp(q2.mod.1.prediction.preds),q2.mod.1.prediction.lci,q2.mod.1.prediction.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 1 Forecast",ylim=c(0,100))
+ts.plot(cbind(series2,exp(q2.mod.2.prediction.preds),q2.mod.2.prediction.lci,q2.mod.2.prediction.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 2 Forecast",ylim=c(0,100))
+ts.plot(cbind(series3,series3.pred,series3.pred.lci,series3.pred.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 3 Forecast",ylim=c(0,100))
+ts.plot(cbind(series4,series4.pred,series4.pred.lci,series4.pred.uci),
+        lty=c(1,2,3,3),col=c(1,2,3,3),main="Series 4 Forecast",ylim=c(0,100))
+```
+-->
+<!--
+### Approach B
+```{r eval=FALSE, include=FALSE}
+q2Data<-varData[varData$year<1993,];series1<-ts(q2Data$series1,start=c(1947,1),frequency=12)
+series2 <- ts(q2Data$series2, start=c(1947,1), frequency=12)
+series3 <- ts(q2Data$series3, start=c(1947,1), frequency=12)
+series4 <- ts(q2Data$series4, start=c(1947,1), frequency=12)
+allseries <- cbind(series1, series2, series3, series4)
+```
+
+```{r eval=FALSE, include=FALSE}
+corrfunc <- function(series1, series2) {
+  cat("Correlation Matrix: ", cor(series1, series2))
+  ccf(series1,series2) 
+}
+```
+
+## Approach 1: Arima for Series 3; VAR for Series 1, 2, and 4
+
+To model series 3, a log transform is taken in order to stabilize the variance, and a first difference is taken to remove the trend.
+
+```{r fig.width=8, fig.height=4, warning=FALSE, eval=FALSE, include=FALSE}
+tsplot(diff(log(series3)), "series3: 1st diff", 1, 1, 0)
+```
+
+The ACF and PACF both show a gradual decline, so both AR and MA components are considered for modeling the transformed series, and a parameter search is performed for AR and MA orders up to 4.
+
+```{r eval=FALSE, include=FALSE}
+search.arma.params <- function(time.series) {
+  for (p in 0:4) {
+    for (q in 0:4) {
+      mod <- Arima(log(time.series), order = c(p,1,q), seasonal = list(order = c(0,0,0),12), method = "ML")
+      print(c(p, q, mod$aic, mod$bic, Box.test(mod$residuals, type="Ljung-Box")$p.value))
+    }
+  }
+}
+search.arma.params(series3)
+```
+```{r}
+search.sarima.params(log(series3),12,4,1,4,0,0,0)
+```
+
+An ARMA(1,2) model for the log transformed and first differenced series shows both low AIC and BIC, as well as failure to reject the null hypothesis of no correlation in the residuals.  The top model returned by the search has 3 non-seasonal AR terms and 4 non-seasonal MA terms, but its BIC is higher than that of the ARIMA(1,1,2) model while having only a slightly lower AIC.  Additionally, an ARIMA(1,1,2) model is more parsimonious than an ARIMA(3,1,4) model, which is more favorable for forecasting.
+
+```{r eval=FALSE, include=FALSE}
+q2.mod.3 <- Arima(log(series3), order=c(1,1,2), seasonal=list(order=c(0,0,0),12), method="ML")
+q2.mod.3
+#abs(polyroot(c(1, -0.7332, 0.3906)))
+#q1.mod$coef + c(-2,2)*sqrt()
+q2.mod.3$coef[1] + c(-2,2)*sqrt(q2.mod.3$var.coef)[1]
+q2.mod.3$coef[2] + c(-2,2)*sqrt(q2.mod.3$var.coef)[5]
+q2.mod.3$coef[3] + c(-2,2)*sqrt(q2.mod.3$var.coef)[9]
+#par(mfrow=c(2,2)); hist(q1.mod$residuals); acf(q1.mod$residuals); pacf(q1.mod$residuals); Box.test(q1.mod$residuals, type="Ljung-Box")
+tsplot(q2.mod.3$residuals, "Model Residuals", 1, 1, 1)
+```
+
+Each AR and MA term is highly statistically significant and the augmented dickey-fuller test rejects the null hypothesis of a unit root in the residuals, and the box-ljung test fails to reject the null hypothesis of no correlation in the residuals.  The residuals appear to be a realization of a white noise process, so we may proceed to forecasting with an ARIMA(1,1,2) model for series 3.
+
+The VARselect function is next used to identify an optimal VAR model order for series 1, series 2, and series 4 together.  Both a constant and a trend are included in the search because it was noted earlier that all series have both a trend and a non-zero mean.  Multiple iterations of the order search were performed-- it was found that without transforming the series, the residuals for series 1 and series 2 contained increasing variance.  Therefore, log transformations of series 1 and series 2 are taken.
+
+```{r eval=FALSE, include=FALSE}
+VARseries <- cbind(log(series1), log(series2), series4)
+#VARselect(log(allseries[,c(1,2,4)]), lag.max=20, type="both")
+#VARselect(cbind(log(allseries[,c(1,2)]), allseries[,4]), lag.max=20, type="both")
+VARselect(VARseries, lag.max=10, type="both")
+```
+
+The information criteria in the VARselect function indicate that a VAR(2) or a VAR(3) model would be appropriate.  Since there is an interest in forecasting, a more parsimonious VAR(2) model was first fitted to the 3 series-- this model showed good performance, however, a Portmanteau test for this model showed marginal evidence of autocorrelation in its residuals.  Therefore, a VAR(3) model is selected to model series 1, 2, and 4, which in addition to showing good performance also fails to reject the null hypothesis of no autocorrelation in its residuals via the Portmanteau test.
+
+```{r eval=FALSE, include=FALSE}
+#var.fit <- VAR(cbind(log(allseries[,c(1,2)]), allseries[,4]), p = 3, type = "both")
+var.fit <- VAR(VARseries, p = 3, type = "both"); summary(var.fit)
+#noticed increasing variance in residuals for series 1 and 2 without a log transforms
+#VAR(2) with and without log transform both had autocorrelation in residuals
+#VAR(2) with log transform on series 1 and 2 had marginal evidence of autocorrelation
+#only VAR(3) with log transform on series 1 and 2, and no log transform on series 4 produced no autocorrelation in the residuals
+```
+
+The model summary shows that the roots of the characteristic equation are all less than unity, indicating that the transformed model is stationary.
+
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+#roots(var.fit)
+var.fit.residuals <- resid(var.fit)
+par(mfrow=c(3,1))
+for (a in 1:3) {
+  #acf(var.fit.residuals[,a]); print(Box.test(var.fit.residuals[,a], type="Ljung-Box")); print(adf.test(var.fit.residuals[,a]))
+  tsplot(var.fit.residuals[,a], paste("Series",a,"Residuals"), 1, 1, 1)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+serial.test(var.fit, lags.pt=12, type="PT.adjusted")
+#null hypothesis: no autocorrelation
+```
+
+```{r fig.width=12, fig.height=8, eval=FALSE, include=FALSE}
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+#fanchart(fit.pr, nc=3); #fanchart(fit.pr, nc=2, names=c('series1', 'series2'))
+```
+
+```{r warning=FALSE, eval=FALSE, include=FALSE}
+#q2.mod.2
+#q2.mod.3
+#abs(polyroot(c(1, -0.7332, 0.3906)))
+#q2.mod.2$coef[1] + c(-2,2)*sqrt(q2.mod.2$var.coef)[1]
+#q2.mod.2$coef[2] + c(-2,2)*sqrt(q2.mod.2$var.coef)[4]
+#tsplot(q2.mod.2$residuals, "Model Residuals")
+```
+```{r eval=FALSE}
+series2.train <- window(series2, start=c(1947,1), end=c(1992,12), frequency=12)
+#series2.test <- window(series2, start=c(1993,1), frequency=12)
+q2.backtest.mod.2 <- Arima(log(series2), order=c(0,1,0), seasonal=list(order=c(0,1,2),4), method="ML")
+#q1.backtest.mod
+#tsplot(q1.backtest.mod$residuals, "Residuals of Model Fitted for Back Testing")
+```
+
+```{r fig.width=8, fig.height=8, eval=FALSE, include=FALSE}
+#for answering the question
+q2.mod.3.prediction <- predict(q2.mod.3, n.ahead=24, ci=0.95)
+q2.mod.3.prediction.SEs <- q2.mod.3.prediction$se
+q2.mod.3.prediction.preds <- ts(q2.mod.3.prediction$pred, st=c(1993,1), fr=12)
+
+q2.mod.3.prediction.uci <- q2.mod.3.prediction.preds + 2*q2.mod.3.prediction.SEs
+q2.mod.3.prediction.lci <- q2.mod.3.prediction.preds - 2*q2.mod.3.prediction.SEs
+
+par(mfrow=c(2,2))
+#ts.plot(cbind(series1, exp(fit.pr$fcst$log.series1.[,1]), exp(fit.pr$fcst$log.series1.[,2]), exp(fit.pr$fcst$log.series1.[,3])), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(exp(fit.pr$fcst$log.series1.[,1]), exp(fit.pr$fcst$log.series1.[,2]), exp(fit.pr$fcst$log.series1.[,3])), lty=c(1,2,3), col=c(1,2,3))
+lines(series1)
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series2, exp(fit.pr$fcst$log.series2.[,1]), exp(fit.pr$fcst$log.series2.[,2]), exp(fit.pr$fcst$log.series2.[,3])), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(exp(fit.pr$fcst$log.series2.[,1]), exp(fit.pr$fcst$log.series2.[,2]), exp(fit.pr$fcst$log.series2.[,3])), lty=c(1,2,3), col=c(1,2,3))
+lines(series2)
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series3, exp(q2.mod.3.prediction.preds), exp(q2.mod.3.prediction.uci), exp(q2.mod.3.prediction.lci)), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series3, exp(q2.mod.3.prediction.preds), exp(q2.mod.3.prediction.uci), exp(q2.mod.3.prediction.lci)), lty=c(1,2,3,3), col=c(1,2,3,3))
+legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+#ts.plot(cbind(series4, fit.pr$fcst$series4[,1], fit.pr$fcst$series4[,2], fit.pr$fcst$series4[,3]), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(fit.pr$fcst$series4[,1], fit.pr$fcst$series4[,2], fit.pr$fcst$series4[,3]), lty=c(1,2,3), col=c(1,2,3))
+lines(series4)
+#legend(x=2000, y=14, legend=c("original", "predicted", "95% confidence interval limit"), lty=c(1,2,3), col=c(1,2,3))
+```
+
+```{r eval=FALSE, include=FALSE}
+#qqnorm(q1.mod$residuals); qqline(q1.mod$residuals)
+```
+
+## Approach 2: Arima for Series 2; VAR for Series 1, 3, and 4
+```{r eval=FALSE, include=FALSE}
+#tsplot(diff(series2), "series2: 1st diff", 1, 1)
+tsplot(diff(log(series2)), "series2: 1st diff", 1, 1, 0)
+```
+
+```{r eval=FALSE, include=FALSE}
+#search.sarima.params(series2,12,2,1,2,0,0,0)
+search.sarima.params(log(series2),12,2,1,2,0,0,0)
+```
+
+```{r fig.width=8, fig.height=4, warning=FALSE, eval=FALSE, include=FALSE}
+#q2.mod.2 <- Arima(series2, order=c(1,1,2), seasonal=list(order=c(0,0,0),12), method="ML")
+q2.mod.2<-Arima(log(series2),order=c(1,1,2),seasonal=list(order=c(0,0,0),12),method="ML");q2.mod.2
+tsplot(q2.mod.2$residuals, "Series 2 Model Residuals", 1, 1, 1)
+data.frame(sma.roots=abs(polyroot(c(1,q2.mod.2$coef[2],q2.mod.2$coef[3]))), 
+           phi1.CI=q2.mod.2$coef[1] + c(-2,2)*sqrt(q2.mod.2$var.coef)[1],
+           theta1.CI=q2.mod.2$coef[2] + c(-2,2)*sqrt(q2.mod.2$var.coef)[5], 
+           theta2.CI=q2.mod.2$coef[3] + c(-2,2)*sqrt(q2.mod.2$var.coef)[9])
+```
+
+```{r eval=FALSE, include=FALSE}
+#VARseries <- cbind(log(series1), log(series3), series4)
+#VARseries <- cbind(series1, log(series3), series4)
+#VARseries <- cbind(series1, series3, series4)
+#VARseries <- cbind(diff(series1), diff(series3), diff(series4))
+VARseries <- cbind(diff(log(series1)), diff(log(series3)), diff(series4))
+#VARselect(VARseries, lag.max=10, type="both")
+VARselect(VARseries, lag.max=10, type="const")
+```
+```{r eval=FALSE, include=FALSE}
+#var.fit <- VAR(cbind(log(allseries[,c(1,2)]), allseries[,4]), p = 3, type = "both")
+#var.fit <- VAR(VARseries, p = 6, type = "both"); summary(var.fit);
+var.fit <- VAR(VARseries, p = 6, type = "const"); summary(var.fit);
+#summary(var.fit)$varresult
+#noticed increasing variance in residuals for series 1 and 2 without a log transforms
+#VAR(2) with and without log transform both had autocorrelation in residuals
+#VAR(2) with log transform on series 1 and 2 had marginal evidence of autocorrelation
+#only VAR(3) with log transform on series 1 and 2, and no log transform on series 4 produced no autocorrelation in the residuals
+```
+
+The model summary shows that the roots of the characteristic equation are all less than unity, indicating that the transformed model is stationary.
+
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+#roots(var.fit)
+var.fit.residuals <- resid(var.fit)
+par(mfrow=c(2,1))
+for (a in 1:3) {
+  #acf(var.fit.residuals[,a]); print(Box.test(var.fit.residuals[,a], type="Ljung-Box")); print(adf.test(var.fit.residuals[,a]))
+  tsplot(var.fit.residuals[,a], paste("Series",a,"Residuals"), 1, 1, 1)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+serial.test(var.fit, lags.pt=12, type="PT.adjusted")#null hypothesis: no autocorrelation
+normality.test(var.fit, multivariate.only = TRUE)
+```
+
+```{r fig.width=12, fig.height=8, eval=FALSE, include=FALSE}
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+#fanchart(fit.pr, nc=3); #fanchart(fit.pr, nc=2, names=c('series1', 'series2'))
+```
+
+```{r eval=FALSE, include=FALSE}
+series2.train <- window(series2, start=c(1947,1), end=c(1992,12), frequency=12)
+#series2.test <- window(series2, start=c(1993,1), frequency=12)
+q2.backtest.mod.2 <- Arima(log(series2), order=c(0,1,0), seasonal=list(order=c(0,1,2),4), method="ML")
+#q1.backtest.mod
+#tsplot(q1.backtest.mod$residuals, "Residuals of Model Fitted for Back Testing")
+```
+
+```{r fig.width=6, fig.height=6, eval=FALSE, include=FALSE}
+#for answering the question
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+q2.mod.1.prediction <- predict(q2.mod.1, n.ahead=24, ci=0.95)
+q2.mod.1.prediction.preds <- ts(q2.mod.1.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.1.prediction.uci <- exp(q2.mod.1.prediction.preds + 2*q2.mod.1.prediction$se)
+q2.mod.1.prediction.lci <- exp(q2.mod.1.prediction.preds - 2*q2.mod.1.prediction$se)
+
+q2.mod.2.prediction <- predict(q2.mod.2, n.ahead=24, ci=0.95)
+q2.mod.2.prediction.preds <- ts(q2.mod.2.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.2.prediction.uci <- exp(q2.mod.2.prediction.preds + 2*q2.mod.2.prediction$se)
+q2.mod.2.prediction.lci <- exp(q2.mod.2.prediction.preds - 2*q2.mod.2.prediction$se)
+
+series3.pred <- ts(exp(fit.pr$fcst$log.series3.[,1]), st=c(1993,1), fr=12)
+series3.pred.lci <- ts(exp(fit.pr$fcst$log.series3.[,2]), st=c(1993,1), fr=12)
+series3.pred.uci <- ts(exp(fit.pr$fcst$log.series3.[,3]), st=c(1993,1), fr=12)
+
+series4.pred <- ts(fit.pr$fcst$series4[,1], st=c(1993,1), fr=12)
+series4.pred.lci <- ts(fit.pr$fcst$series4[,2], st=c(1993,1), fr=12)
+series4.pred.uci <- ts(fit.pr$fcst$series4[,3], st=c(1993,1), fr=12)
+
+par(mfrow=c(2,2))
+ts.plot(cbind(series1, exp(q2.mod.1.prediction.preds), q2.mod.1.prediction.lci, q2.mod.1.prediction.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series2, exp(q2.mod.2.prediction.preds), q2.mod.2.prediction.lci, q2.mod.2.prediction.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series3, series3.pred, series3.pred.lci, series3.pred.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series4, series4.pred, series4.pred.lci, series4.pred.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+```
+-->
+<!--
+## Approach 3: VAR for differenced Series 3 and 4
+```{r eval=FALSE, include=FALSE}
+#VARselect(cbind(diff(log(series3)),diff(series4)), lag.max=12, type="both")
+VARselect(cbind(diff(log(series3)),diff(series4)), lag.max=12, type="const")
+```
+
+```{r eval=FALSE, include=FALSE}
+#var.fit <- VAR(cbind(diff(log(series3)),diff(series4)), p = 6, type = "both"); summary(var.fit); #summary(var.fit)$varresult
+var.fit <- VAR(cbind(diff(log(series3)),diff(series4)), p = 6, type = "const"); summary(var.fit); #summary(var.fit)$varresult
+```
+
+The model summary shows that the roots of the characteristic equation are all less than unity, indicating that the transformed model is stationary.
+
+```{r fig.width=8, fig.height=4, eval=FALSE, include=FALSE}
+#roots(var.fit)
+var.fit.residuals <- resid(var.fit)
+par(mfrow=c(2,1))
+for (a in 1:2) {
+  #acf(var.fit.residuals[,a]); print(Box.test(var.fit.residuals[,a], type="Ljung-Box")); print(adf.test(var.fit.residuals[,a]))
+  tsplot(var.fit.residuals[,a], paste("Series",a,"Residuals"), 1, 1, 1)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+serial.test(var.fit, lags.pt=12, type="PT.adjusted")#null hypothesis: no autocorrelation
+```
+
+```{r fig.width=12, fig.height=8, eval=FALSE, include=FALSE}
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+#fanchart(fit.pr, nc=3); #fanchart(fit.pr, nc=2, names=c('series1', 'series2'))
+```
+
+```{r eval=FALSE, include=FALSE}
+series2.train <- window(series2, start=c(1947,1), end=c(1992,12), frequency=12)
+#series2.test <- window(series2, start=c(1993,1), frequency=12)
+q2.backtest.mod.2 <- Arima(log(series2), order=c(0,1,0), seasonal=list(order=c(0,1,2),4), method="ML")
+#q1.backtest.mod
+#tsplot(q1.backtest.mod$residuals, "Residuals of Model Fitted for Back Testing")
+```
+
+```{r fig.width=6, fig.height=6, eval=FALSE, include=FALSE}
+#for answering the question
+fit.pr <- predict(var.fit, n.ahead=24, ci=0.95)
+q2.mod.1.prediction <- predict(q2.mod.1, n.ahead=24, ci=0.95)
+q2.mod.1.prediction.preds <- ts(q2.mod.1.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.1.prediction.uci <- exp(q2.mod.1.prediction.preds + 2*q2.mod.1.prediction$se)
+q2.mod.1.prediction.lci <- exp(q2.mod.1.prediction.preds - 2*q2.mod.1.prediction$se)
+
+q2.mod.2.prediction <- predict(q2.mod.2, n.ahead=24, ci=0.95)
+q2.mod.2.prediction.preds <- ts(q2.mod.2.prediction$pred, st=c(1993,1), fr=12)
+q2.mod.2.prediction.uci <- exp(q2.mod.2.prediction.preds + 2*q2.mod.2.prediction$se)
+q2.mod.2.prediction.lci <- exp(q2.mod.2.prediction.preds - 2*q2.mod.2.prediction$se)
+
+series3.pred <- ts(exp(fit.pr$fcst$log.series3.[,1]), st=c(1993,1), fr=12)
+series3.pred.lci <- ts(exp(fit.pr$fcst$log.series3.[,2]), st=c(1993,1), fr=12)
+series3.pred.uci <- ts(exp(fit.pr$fcst$log.series3.[,3]), st=c(1993,1), fr=12)
+
+series4.pred <- ts(fit.pr$fcst$series4[,1], st=c(1993,1), fr=12)
+series4.pred.lci <- ts(fit.pr$fcst$series4[,2], st=c(1993,1), fr=12)
+series4.pred.uci <- ts(fit.pr$fcst$series4[,3], st=c(1993,1), fr=12)
+
+par(mfrow=c(2,2))
+ts.plot(cbind(series1, exp(q2.mod.1.prediction.preds), q2.mod.1.prediction.lci, q2.mod.1.prediction.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series2, exp(q2.mod.2.prediction.preds), q2.mod.2.prediction.lci, q2.mod.2.prediction.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series3, series3.pred, series3.pred.lci, series3.pred.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+ts.plot(cbind(series4, series4.pred, series4.pred.lci, series4.pred.uci), lty=c(1,2,3,3), col=c(1,2,3,3))
+```
+-->
+<!--
+### Approach 2: Fitting VAR(1) to Differenced Series
+
+```{r eval=FALSE, include=FALSE}
+par(mfrow=c(2,2))
+plot.ts(diff((series4)))
+hist(diff((series4)))
+acf(diff((series4)))
+pacf(diff((series4)))
+adf.test(diff((series4)))
+```
+
+```{r eval=FALSE, include=FALSE}
+par(mfrow=c(2,2))
+plot.ts(diff(log(series1)))
+hist(diff(log(series1)))
+acf(diff(log(series1)))
+pacf(diff(log(series1)))
+adf.test(diff(log(series1)))
+```
+
+```{r eval=FALSE, include=FALSE}
+par(mfrow=c(2,2))
+plot.ts(diff(log(series2)))
+hist(diff(log(series2)))
+acf(diff(log(series2)))
+pacf(diff(log(series2)))
+adf.test(diff(log(series2)))
+```
+
+```{r eval=FALSE, include=FALSE}
+par(mfrow=c(2,2))
+plot.ts(diff(log(series3)))
+hist(diff(log(series3)))
+acf(diff(log(series3)))
+pacf(diff(log(series3)))
+adf.test(diff(log(series3)))
+```
+
+```{r eval=FALSE, include=FALSE}
+par(mfrow=c(2,2))
+plot.ts(diff(log(series4)))
+hist(diff(log(series4)))
+acf(diff(log(series4)))
+pacf(diff(log(series4)))
+adf.test(diff(log(series4)))
+```
+
+```{r eval=FALSE, include=FALSE}
+#ggpairs(data.frame(cbind(diff((series1)), diff((series2)), diff((series3)), diff(series4))))
+```
+
+```{r eval=FALSE, include=FALSE}
+#ggpairs(data.frame(cbind(diff(log(series1)), diff(log(series2)), diff(log(series3)), diff(series4))))
+```
+
+```{r eval=FALSE, include=FALSE}
+allseries2 <- cbind(diff(series1), diff(series2), diff(series3), diff(series4))
+plot.ts(allseries2)
+po.test(allseries2) #null hypothesis is that the two series are not cointegrated
+par(mfrow=c(2,3))
+for (a in 1:4) {
+  for (b in 1:4) {
+    if (a != b & b > a) {
+      corrfunc(allseries2[,a],allseries2[,b])
+      print(po.test(cbind(allseries2[,a],allseries2[,b])))
+    }
+  }
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+VARselect(allseries2, lag.max = 10, type = "both")
+```
+
+```{r eval=FALSE, include=FALSE}
+var.fit2 <- VAR(allseries2, p = 1, type = "both")
+summary(var.fit2)
+```
+
+```{r eval=FALSE, include=FALSE}
+var.fit2.residuals <- resid(var.fit2)
+par(mfrow=c(2,2))
+for (a in 1:4) {
+  acf(var.fit2.residuals[,a])
+  print(Box.test(var.fit2.residuals[,a], type="Ljung-Box"))
+  print(adf.test(var.fit2.residuals[,a]))
+}
+acf(resid(var.fit2))
+```
+-->
